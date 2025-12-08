@@ -5,10 +5,10 @@ import re
 import plotly.express as px
 
 # ページ設定
-st.set_page_config(page_title="配置馬券術 Web", layout="wide")
+st.set_page_config(page_title="配置馬券術 Web (完全版)", layout="wide")
 
 # ==========================================
-# 1. 共通ロジック
+# 1. 共通ロジック & データ読み込み
 # ==========================================
 
 def to_half_width(text):
@@ -36,7 +36,7 @@ def load_data(file):
         else:
             df = pd.read_excel(file, engine='openpyxl')
     except:
-        return pd.DataFrame(), "エラー"
+        return pd.DataFrame(), "エラー: ファイルを読み込めませんでした"
 
     df.columns = df.columns.str.strip()
     
@@ -71,6 +71,7 @@ def load_data(file):
 
     return df[potential_cols].copy(), "success"
 
+# --- 配置計算ロジック ---
 def calc_haichi_numbers(df):
     if df[['逆番', '正循環', '逆循環']].notna().all().all():
         df['計算_逆番'] = df['逆番']
@@ -78,7 +79,6 @@ def calc_haichi_numbers(df):
         df['計算_逆循環'] = df['逆循環']
         return df
     
-    # 頭数自動計算 (地方競馬対応)
     max_umaban = df.groupby(['場名', 'R'])['正番'].transform('max')
     df['使用頭数'] = max_umaban.fillna(16).astype(int)
     if '頭数' in df.columns:
@@ -108,38 +108,130 @@ def get_pair_pattern(row1, row2):
              if r1[i] is not None and r2[j] is not None and r1[i] == r2[j] and r1[i] != 0]
     return ",".join(pairs)
 
+def get_common_values(group):
+    cols = ['正番', '計算_逆番', '計算_正循環', '計算_逆循環']
+    common_set = None
+    for _, row in group.iterrows():
+        current_set = set()
+        for col in cols:
+            val = row.get(col)
+            if pd.notna(val):
+                try:
+                    num = int(float(val))
+                    if num != 0: current_set.add(num)
+                except: continue
+        if common_set is None: common_set = current_set
+        else: common_set = common_set.intersection(current_set)
+        if not common_set: return None
+    if common_set: return ','.join(map(str, sorted(list(common_set))))
+    return None
+
 # ==========================================
-# 2. 分析ロジック (判定処理)
+# 2. 分析ロジック (青塗・ペア・前日判定)
 # ==========================================
-def analyze_logic(df):
-    df = calc_haichi_numbers(df)
-    recommendations = []
+
+def analyze_logic(df_curr, df_prev=None):
+    df_curr = calc_haichi_numbers(df_curr)
+    if df_prev is not None and not df_prev.empty:
+        df_prev = calc_haichi_numbers(df_prev)
     
-    # データをソートしておく
-    df = df.sort_values(['場名', 'R', '正番'])
+    rec_list = []
     
-    # --- 1. 騎手ペア ---
-    for name, group in df.groupby('騎手'):
+    # --------------------------
+    # A. 青塗 (Blue Paint) 判定
+    # --------------------------
+    blue_keys = set() # (場名, R, 馬名)
+    
+    for col in ['騎手', '厩舎', '馬主']:
+        # グループ化 (場名, 属性名)
+        group_keys = ['場名', col] if col == '騎手' else [col] # 騎手は同場のみ、他は全場
+        
+        try:
+            for name, group in df_curr.groupby(group_keys):
+                if len(group) < 2: continue
+                
+                # 名前取得
+                target_name = name[1] if isinstance(name, tuple) else name
+                if not target_name: continue
+
+                common_vals = get_common_values(group)
+                if common_vals:
+                    # 相手レースの特定
+                    all_races = sorted(group['R'].unique())
+                    priority = 0.3 if col == '騎手' else (0.2 if col == '厩舎' else 0.1)
+                    
+                    for _, row in group.iterrows():
+                        other_races = [str(r) for r in all_races if r != row['R']]
+                        remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}R]'
+                        
+                        rec_list.append({
+                            '場名': row['場名'], 'R': row['R'], '正番': row['正番'], '馬名': row['馬名'],
+                            '属性': f"{col}:{target_name}", 
+                            'タイプ': f'★ {col}青塗', 
+                            'パターン': 'Blue', # グラフ用カテゴリ
+                            '条件': remark,
+                            'スコア': 9.0 + priority
+                        })
+                        blue_keys.add((row['場名'], row['R'], row['馬名']))
+        except: continue
+
+    # --------------------------
+    # B. 青塗の隣 (Blue Neighbors)
+    # --------------------------
+    if blue_keys:
+        for (place, race), group in df_curr.groupby(['場名', 'R']):
+            group = group.sort_values('正番')
+            umaban_map = {int(row['正番']): row for _, row in group.iterrows()}
+            
+            # 青塗馬を探す
+            blue_horses = [row for _, row in group.iterrows() if (place, race, row['馬名']) in blue_keys]
+            
+            for b_row in blue_horses:
+                curr_num = int(b_row['正番'])
+                for t_num in [curr_num - 1, curr_num + 1]:
+                    if t_num in umaban_map:
+                        t_row = umaban_map[t_num]
+                        # 自身が青塗でない場合のみ追加
+                        if (place, race, t_row['馬名']) not in blue_keys:
+                            rec_list.append({
+                                '場名': place, 'R': race, '正番': t_num, '馬名': t_row['馬名'],
+                                '属性': '(青塗隣)',
+                                'タイプ': '△ 青塗の隣',
+                                'パターン': 'BlueNeighbor',
+                                '条件': f"青塗馬(#{curr_num})の隣",
+                                'スコア': 9.0 # 青塗と同等の高評価
+                            })
+
+    # --------------------------
+    # C. 通常ペア (Pairs)
+    # --------------------------
+    # 1. 騎手ペア
+    for name, group in df_curr.groupby('騎手'):
         if len(group) < 2: continue
         group = group.sort_values('R').to_dict('records')
         for i in range(len(group)-1):
             curr, next_r = group[i], group[i+1]
-            if curr['場名'] != next_r['場名']: continue # 同場のみ
+            if curr['場名'] != next_r['場名']: continue
             pat = get_pair_pattern(curr, next_r)
             if pat:
-                # 相互に登録
-                recommendations.append({
+                label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
+                base_score = 4.0 if label.startswith("◎") else 3.0
+                
+                # 相互登録
+                rec_list.append({
                     '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
-                    '騎手': name, 'タイプ': '騎手ペア', 'パターン': pat, '相手R': next_r['R'], 'スコア': 3.3
+                    '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
+                    '条件': f"[騎手] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 0.3
                 })
-                recommendations.append({
+                rec_list.append({
                     '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
-                    '騎手': name, 'タイプ': '騎手ペア', 'パターン': pat, '相手R': curr['R'], 'スコア': 3.3
+                    '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
+                    '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
                 })
 
-    # --- 2. 厩舎ペア ---
-    if '厩舎' in df.columns:
-        for (place, name), group in df.groupby(['場名', '厩舎']):
+    # 2. 厩舎ペア (同場)
+    if '厩舎' in df_curr.columns:
+        for (place, name), group in df_curr.groupby(['場名', '厩舎']):
             if len(group) < 2: continue
             group = group.sort_values('R').to_dict('records')
             for i in range(len(group)):
@@ -147,38 +239,64 @@ def analyze_logic(df):
                     curr, next_r = group[i], group[j]
                     pat = get_pair_pattern(curr, next_r)
                     if pat:
-                        recommendations.append({
-                            '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
-                            '騎手': f"(厩舎:{name})", 'タイプ': '厩舎ペア', 'パターン': pat, '相手R': next_r['R'], 'スコア': 3.2
+                        label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
+                        base_score = 4.0 if label.startswith("◎") else 3.0
+                        
+                        rec_list.append({
+                            '場名': place, 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
+                            '属性': f"厩舎:{name}", 'タイプ': label, 'パターン': pat, 
+                            '条件': f"[厩舎] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 0.2
                         })
-                        recommendations.append({
-                            '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
-                            '騎手': f"(厩舎:{name})", 'タイプ': '厩舎ペア', 'パターン': pat, '相手R': curr['R'], 'スコア': 3.2
+                        rec_list.append({
+                            '場名': place, 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
+                            '属性': f"厩舎:{name}", 'タイプ': label, 'パターン': pat, 
+                            '条件': f"[厩舎] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.2
                         })
 
-    if not recommendations:
+    # --------------------------
+    # D. 前日同配置 (騎手のみ)
+    # --------------------------
+    if df_prev is not None and not df_prev.empty:
+        for idx, row in df_curr.iterrows():
+            race = row['R']
+            name = row['騎手']
+            if not name: continue
+            
+            # 前日の同レース・同騎手を探す
+            prev_rows = df_prev[(df_prev['R'] == race) & (df_prev['騎手'] == name)]
+            for _, p_row in prev_rows.iterrows():
+                is_seiban = (p_row['正番'] == row['正番'])
+                is_gyaku = (p_row['計算_逆番'] == row['計算_逆番'])
+                
+                if is_seiban or is_gyaku:
+                    reason = "正番" if is_seiban else "逆番"
+                    rec_list.append({
+                        '場名': row['場名'], 'R': race, '正番': row['正番'], '馬名': row['馬名'],
+                        '属性': f"騎手:{name}", 'タイプ': '★ 前日同配置', 
+                        'パターン': 'PrevDay',
+                        '条件': f"[騎手] 前日{race}R同配置({reason})", 
+                        'スコア': 8.3
+                    })
+
+    if not rec_list:
         return pd.DataFrame()
         
-    res_df = pd.DataFrame(recommendations)
+    res_df = pd.DataFrame(rec_list)
     
-    # 重複削除 (同じ馬が複数の理由で選ばれた場合、スコアを加算して統合)
-    # まず馬ごとにグループ化
+    # 重複削除と統合
     agg_funcs = {
-        '騎手': 'first',
-        'タイプ': lambda x: '/'.join(sorted(set(x))),
+        '属性': lambda x: ' + '.join(sorted(set(x))),
+        'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), # ★優先
         'パターン': lambda x: ','.join(sorted(set(x))),
+        '条件': lambda x: ' / '.join(sorted(set(x))),
         'スコア': 'sum',
-        '正番': 'first' # ソート用
+        '正番': 'first'
     }
     
-    # 必要な列だけでグルーピング
     res_df = res_df.groupby(['場名', 'R', '馬名'], as_index=False).agg(agg_funcs)
+    res_df = res_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
     
-    # ★重要: レース順に並べ替え (ここを追加！)
-    res_df = res_df.sort_values(['場名', 'R', '正番'], ascending=[True, True, True])
-    
-    # 着順列の初期化
-    res_df['着順'] = np.nan
+    if '着順' not in res_df.columns: res_df['着順'] = np.nan
     
     return res_df
 
@@ -186,26 +304,27 @@ def analyze_logic(df):
 # 3. Webアプリ画面 (Streamlit)
 # ==========================================
 
-st.title("🏇 配置馬券術 リアルタイム分析")
-st.caption("着順を入力すると、統計とスコアが即座に更新されます。")
+st.title("🏇 配置馬券術 リアルタイム分析 (完全版)")
 
 # サイドバー
 with st.sidebar:
     st.header("データ入力")
     uploaded_file = st.file_uploader("当日データをアップロード", type=['xlsx', 'csv'])
+    prev_file = st.file_uploader("前日データをアップロード (任意)", type=['xlsx', 'csv'])
     st.markdown("---")
-    st.write("※Excelファイル(.xlsx)またはCSVファイル(.csv)に対応しています。")
+    st.caption("前日データを入れると「前日同配置(騎手)」も判定します。")
 
 if uploaded_file:
     df_raw, status = load_data(uploaded_file)
+    df_prev, _ = load_data(prev_file) if prev_file else (None, None)
     
     if status == "success":
-        # 初回分析 (session_stateで保持)
+        # 初回分析 (キャッシュ)
         if 'analyzed_df' not in st.session_state:
-            with st.spinner('分析中...'):
-                result_df = analyze_logic(df_raw)
+            with st.spinner('全レース分析中...'):
+                result_df = analyze_logic(df_raw, df_prev)
                 if not result_df.empty:
-                    # 編集用IDを作成 (Streamlitの仕様対策)
+                    # 編集用ID
                     result_df['id'] = result_df.index
                     st.session_state['analyzed_df'] = result_df
                 else:
@@ -215,63 +334,48 @@ if uploaded_file:
         if not st.session_state['analyzed_df'].empty:
             
             # --- 1. データエディタ (着順入力) ---
-            st.subheader("📝 結果入力・推奨馬リスト")
+            st.subheader("📝 結果入力 & 推奨馬リスト")
             
-            # 表示する列を整理
             display_df = st.session_state['analyzed_df'].copy()
             
             edited_df = st.data_editor(
                 display_df,
                 column_config={
                     "着順": st.column_config.NumberColumn(
-                        "着順 (入力)",
-                        help="確定した着順を入力してください (1〜18)",
-                        min_value=1,
-                        max_value=18,
-                        step=1,
-                        format="%d"
+                        "着順", help="確定着順を入力 (1-18)", min_value=1, max_value=18, step=1, format="%d"
                     ),
                     "スコア": st.column_config.ProgressColumn(
-                        "重要度",
-                        format="%.1f",
-                        min_value=0,
-                        max_value=15,
+                        "重要度", format="%.1f", min_value=0, max_value=20,
                     ),
                 },
-                disabled=["場名", "R", "馬名", "正番", "騎手", "タイプ", "パターン", "スコア"],
+                disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
                 hide_index=True,
                 use_container_width=True,
-                height=500,
-                key="editor" # キーを指定して状態を維持
+                height=600,
+                key="editor"
             )
             
-            # 入力されたデータをセッションステートに反映
-            # (data_editorは自動でstateを更新しない場合があるため念のため)
             if edited_df is not None:
                 st.session_state['analyzed_df'] = edited_df
 
             # ==========================================
-            # 4. リアルタイム集計 & グラフ
+            # 4. リアルタイム集計
             # ==========================================
             
             df_hits = edited_df[edited_df['着順'].notna()].copy()
             df_hits['着順'] = pd.to_numeric(df_hits['着順'], errors='coerce')
-            df_fuku = df_hits[df_hits['着順'] <= 3]
+            df_fuku = df_hits[df_hits['着順'] <= 3] # 3着内
 
-            st.markdown("---")
-            st.subheader("📊 リアルタイム分析レポート")
+            st.divider()
+            st.subheader("📊 リアルタイム傾向分析")
 
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("消化レース数", len(df_hits['R'].unique()))
-            with col2:
-                # 複勝率
-                fuku_rate = len(df_fuku) / len(df_hits) * 100 if len(df_hits) > 0 else 0
-                st.metric("推奨馬 複勝率", f"{fuku_rate:.1f}%")
-            with col3:
-                # 単勝回収率 (オッズデータがないので仮)
-                # 実装するならload_dataで単オッズを読み込み計算する
-                st.metric("的中数", f"{len(df_fuku)} 頭")
+            # 指標
+            c1, c2, c3 = st.columns(3)
+            with c1: st.metric("消化レース", len(df_hits['R'].unique()))
+            with c2: 
+                rate = len(df_fuku)/len(df_hits)*100 if len(df_hits)>0 else 0
+                st.metric("推奨馬 複勝率", f"{rate:.1f}%")
+            with c3: st.metric("的中数", f"{len(df_fuku)} 頭")
 
             if not df_fuku.empty:
                 # 開催場ごとにタブ分け
@@ -280,69 +384,72 @@ if uploaded_file:
                 
                 for tab, place in zip(tabs, places):
                     with tab:
-                        col_g1, col_g2 = st.columns(2)
-                        
+                        col_g1, col_g2 = st.columns([1, 1])
                         place_data = df_fuku[df_fuku['場名'] == place]
                         
-                        # パターン別集計 (カンマ区切りを展開)
+                        # パターン集計 (カンマ区切りを展開)
                         all_patterns = []
                         for p in place_data['パターン']:
                             if p: all_patterns.extend(p.split(','))
                         
+                        # 青塗やPrevDayなどの特殊タグを除外してA-Rだけ見るか、全部見るか
+                        # ここでは全部見る
                         if all_patterns:
                             pat_counts = pd.Series(all_patterns).value_counts().reset_index()
                             pat_counts.columns = ['パターン', '的中数']
                             
                             with col_g1:
                                 fig = px.pie(pat_counts, values='的中数', names='パターン', 
-                                            title=f'【{place}】 パターン別 的中シェア',
-                                            hole=0.4)
+                                            title=f'【{place}】 的中パターンの内訳', hole=0.4)
                                 st.plotly_chart(fig, use_container_width=True)
                             
                             with col_g2:
-                                st.write(f"**{place} の的中馬一覧**")
-                                st.dataframe(place_data[['R', '馬名', '騎手', 'パターン', '着順']], use_container_width=True, hide_index=True)
+                                st.write(f"**{place} の的中詳細**")
+                                st.dataframe(place_data[['R', '馬名', '騎手/厩舎/馬主', 'タイプ', '着順']], use_container_width=True, hide_index=True)
                         else:
-                            st.info("パターンデータがありません")
+                            st.info("パターンデータなし")
 
-                # --- 傾向スコア加算 ---
-                st.markdown("### 📈 次のレースの注目馬 (傾向加味)")
+                # --- 傾向スコア加算ロジック ---
+                st.markdown("### 📈 次レースの注目馬 (傾向加算)")
+                
+                # 的中したパターンを収集
                 hit_patterns = set()
                 for p in df_fuku['パターン']:
                     if p: hit_patterns.update(p.split(','))
                 
-                # まだ着順が入っていない馬
+                # 未出走馬
                 future_races = edited_df[edited_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
-                    # 当たりパターンを持っているか判定
-                    def calc_trend_bonus(row_pat):
-                        if not row_pat: return 0
+                    def calc_bonus(row_pat):
+                        if not row_pat: return 0.0
                         pats = row_pat.split(',')
-                        bonus = 0
+                        bonus = 0.0
+                        # 青塗(Blue)や前日(PrevDay)は元々高いので、A-Rパターンの傾向を重視
                         for p in pats:
-                            if p in hit_patterns: bonus += 1.0 # ヒットしたパターン1つにつき+1点
+                            if p in hit_patterns and len(p) == 1: # A-Zの1文字パターンのみ加点対象
+                                bonus += 2.0 
                         return bonus
 
-                    future_races['傾向加点'] = future_races['パターン'].apply(calc_trend_bonus)
+                    future_races['傾向加点'] = future_races['パターン'].apply(calc_bonus)
                     future_races['総合スコア'] = future_races['スコア'] + future_races['傾向加点']
                     
-                    # 傾向加点がある馬のみ、またはスコア上位を表示
+                    # 傾向加点がついた馬を上位表示
                     hot_horses = future_races[future_races['傾向加点'] > 0].sort_values(['場名', 'R', '総合スコア'], ascending=[True, True, False])
                     
                     if not hot_horses.empty:
-                        st.success("本日の当たりパターンを持つ馬が検出されました！")
+                        st.success(f"本日好調なパターンを持つ馬が {len(hot_horses)} 頭います！")
                         st.dataframe(
-                            hot_horses[['場名', 'R', '馬名', '騎手', 'パターン', 'スコア', '傾向加点', '総合スコア']],
+                            hot_horses[['場名', 'R', '馬名', 'タイプ', 'パターン', 'スコア', '傾向加点', '総合スコア']],
                             use_container_width=True,
                             hide_index=True
                         )
                     else:
-                        st.info("現在、傾向と合致する未出走馬はありません。")
+                        st.info("現時点では、特定の傾向に合致する未出走馬はありません。")
             else:
-                st.info("的中データがまだありません。レース結果を入力してください。")
-
+                st.info("まだ的中データがありません。着順を入力してください。")
         else:
-            st.warning("推奨対象となる馬が見つかりませんでした。")
+            st.warning("推奨馬が見つかりませんでした。")
     else:
-        st.error("ファイルの読み込みに失敗しました。形式を確認してください。")
+        st.error("ファイルの読み込みに失敗しました。")
+
