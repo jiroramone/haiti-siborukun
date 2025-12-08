@@ -5,7 +5,7 @@ import re
 import plotly.express as px
 
 # ページ設定
-st.set_page_config(page_title="配置馬券術 Web (完全版)", layout="wide")
+st.set_page_config(page_title="配置馬券術 Web", layout="wide")
 
 # ==========================================
 # 1. 共通ロジック & データ読み込み
@@ -137,75 +137,54 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # --------------------------
-    # A. 青塗 (Blue Paint) 判定
-    # --------------------------
-    blue_keys = set() # (場名, R, 馬名)
-    
+    # A. 青塗
+    blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
-        # グループ化 (場名, 属性名)
-        group_keys = ['場名', col] if col == '騎手' else [col] # 騎手は同場のみ、他は全場
-        
+        group_keys = ['場名', col] if col == '騎手' else [col]
         try:
             for name, group in df_curr.groupby(group_keys):
                 if len(group) < 2: continue
-                
-                # 名前取得
                 target_name = name[1] if isinstance(name, tuple) else name
                 if not target_name: continue
-
                 common_vals = get_common_values(group)
                 if common_vals:
-                    # 相手レースの特定
                     all_races = sorted(group['R'].unique())
                     priority = 0.3 if col == '騎手' else (0.2 if col == '厩舎' else 0.1)
-                    
                     for _, row in group.iterrows():
                         other_races = [str(r) for r in all_races if r != row['R']]
                         remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}R]'
-                        
                         rec_list.append({
                             '場名': row['場名'], 'R': row['R'], '正番': row['正番'], '馬名': row['馬名'],
                             '属性': f"{col}:{target_name}", 
                             'タイプ': f'★ {col}青塗', 
-                            'パターン': 'Blue', # グラフ用カテゴリ
+                            'パターン': 'Blue', 
                             '条件': remark,
                             'スコア': 9.0 + priority
                         })
                         blue_keys.add((row['場名'], row['R'], row['馬名']))
         except: continue
 
-    # --------------------------
-    # B. 青塗の隣 (Blue Neighbors)
-    # --------------------------
+    # B. 青塗の隣
     if blue_keys:
         for (place, race), group in df_curr.groupby(['場名', 'R']):
             group = group.sort_values('正番')
             umaban_map = {int(row['正番']): row for _, row in group.iterrows()}
-            
-            # 青塗馬を探す
             blue_horses = [row for _, row in group.iterrows() if (place, race, row['馬名']) in blue_keys]
-            
             for b_row in blue_horses:
                 curr_num = int(b_row['正番'])
                 for t_num in [curr_num - 1, curr_num + 1]:
                     if t_num in umaban_map:
                         t_row = umaban_map[t_num]
-                        # 自身が青塗でない場合のみ追加
                         if (place, race, t_row['馬名']) not in blue_keys:
                             rec_list.append({
                                 '場名': place, 'R': race, '正番': t_num, '馬名': t_row['馬名'],
-                                '属性': '(青塗隣)',
-                                'タイプ': '△ 青塗の隣',
+                                '属性': '(青塗隣)', 'タイプ': '△ 青塗の隣',
                                 'パターン': 'BlueNeighbor',
                                 '条件': f"青塗馬(#{curr_num})の隣",
-                                'スコア': 9.0 # 青塗と同等の高評価
+                                'スコア': 9.0
                             })
 
-    # --------------------------
-    # C. 通常ペア (Pairs)
-    # --------------------------
-    # 1. 騎手ペア
+    # C. 通常ペア (騎手)
     for name, group in df_curr.groupby('騎手'):
         if len(group) < 2: continue
         group = group.sort_values('R').to_dict('records')
@@ -216,8 +195,6 @@ def analyze_logic(df_curr, df_prev=None):
             if pat:
                 label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
                 base_score = 4.0 if label.startswith("◎") else 3.0
-                
-                # 相互登録
                 rec_list.append({
                     '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
                     '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
@@ -229,7 +206,7 @@ def analyze_logic(df_curr, df_prev=None):
                     '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
                 })
 
-    # 2. 厩舎ペア (同場)
+    # C. 通常ペア (厩舎)
     if '厩舎' in df_curr.columns:
         for (place, name), group in df_curr.groupby(['場名', '厩舎']):
             if len(group) < 2: continue
@@ -241,7 +218,6 @@ def analyze_logic(df_curr, df_prev=None):
                     if pat:
                         label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
                         base_score = 4.0 if label.startswith("◎") else 3.0
-                        
                         rec_list.append({
                             '場名': place, 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
                             '属性': f"厩舎:{name}", 'タイプ': label, 'パターン': pat, 
@@ -253,21 +229,16 @@ def analyze_logic(df_curr, df_prev=None):
                             '条件': f"[厩舎] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.2
                         })
 
-    # --------------------------
     # D. 前日同配置 (騎手のみ)
-    # --------------------------
     if df_prev is not None and not df_prev.empty:
         for idx, row in df_curr.iterrows():
             race = row['R']
             name = row['騎手']
             if not name: continue
-            
-            # 前日の同レース・同騎手を探す
             prev_rows = df_prev[(df_prev['R'] == race) & (df_prev['騎手'] == name)]
             for _, p_row in prev_rows.iterrows():
                 is_seiban = (p_row['正番'] == row['正番'])
                 is_gyaku = (p_row['計算_逆番'] == row['計算_逆番'])
-                
                 if is_seiban or is_gyaku:
                     reason = "正番" if is_seiban else "逆番"
                     rec_list.append({
@@ -283,10 +254,10 @@ def analyze_logic(df_curr, df_prev=None):
         
     res_df = pd.DataFrame(rec_list)
     
-    # 重複削除と統合
+    # 統合処理
     agg_funcs = {
         '属性': lambda x: ' + '.join(sorted(set(x))),
-        'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), # ★優先
+        'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), 
         'パターン': lambda x: ','.join(sorted(set(x))),
         '条件': lambda x: ' / '.join(sorted(set(x))),
         'スコア': 'sum',
@@ -392,8 +363,6 @@ if uploaded_file:
                         for p in place_data['パターン']:
                             if p: all_patterns.extend(p.split(','))
                         
-                        # 青塗やPrevDayなどの特殊タグを除外してA-Rだけ見るか、全部見るか
-                        # ここでは全部見る
                         if all_patterns:
                             pat_counts = pd.Series(all_patterns).value_counts().reset_index()
                             pat_counts.columns = ['パターン', '的中数']
@@ -405,7 +374,8 @@ if uploaded_file:
                             
                             with col_g2:
                                 st.write(f"**{place} の的中詳細**")
-                                st.dataframe(place_data[['R', '馬名', '騎手/厩舎/馬主', 'タイプ', '着順']], use_container_width=True, hide_index=True)
+                                # ★修正ポイント: エラー原因だった列名を「属性」に修正
+                                st.dataframe(place_data[['R', '馬名', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
                         else:
                             st.info("パターンデータなし")
 
@@ -425,9 +395,8 @@ if uploaded_file:
                         if not row_pat: return 0.0
                         pats = row_pat.split(',')
                         bonus = 0.0
-                        # 青塗(Blue)や前日(PrevDay)は元々高いので、A-Rパターンの傾向を重視
                         for p in pats:
-                            if p in hit_patterns and len(p) == 1: # A-Zの1文字パターンのみ加点対象
+                            if p in hit_patterns and len(p) == 1: # A-Zの1文字パターンのみ加点
                                 bonus += 2.0 
                         return bonus
 
