@@ -254,7 +254,6 @@ def analyze_logic(df_curr, df_prev=None):
         
     res_df = pd.DataFrame(rec_list)
     
-    # 統合処理
     agg_funcs = {
         '属性': lambda x: ' + '.join(sorted(set(x))),
         'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), 
@@ -275,7 +274,7 @@ def analyze_logic(df_curr, df_prev=None):
 # 3. Webアプリ画面 (Streamlit)
 # ==========================================
 
-st.title("🏇 配置馬券術 リアルタイム分析 (完全版)")
+st.title("🏇 配置馬券術 リアルタイム分析 (Button Update Ver)")
 
 # サイドバー
 with st.sidebar:
@@ -304,36 +303,47 @@ if uploaded_file:
         # --- メインエリア ---
         if not st.session_state['analyzed_df'].empty:
             
-            # --- 1. データエディタ (着順入力) ---
+            # --- 1. データエディタ (Formでラップ) ---
             st.subheader("📝 結果入力 & 推奨馬リスト")
             
-            display_df = st.session_state['analyzed_df'].copy()
-            
-            edited_df = st.data_editor(
-                display_df,
-                column_config={
-                    "着順": st.column_config.NumberColumn(
-                        "着順", help="確定着順を入力 (1-18)", min_value=1, max_value=18, step=1, format="%d"
-                    ),
-                    "スコア": st.column_config.ProgressColumn(
-                        "重要度", format="%.1f", min_value=0, max_value=20,
-                    ),
-                },
-                disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
-                hide_index=True,
-                use_container_width=True,
-                height=600,
-                key="editor"
-            )
-            
-            if edited_df is not None:
+            # ★変更点: st.form で囲むことで、ボタンを押すまで更新されないようにする
+            with st.form("result_entry_form"):
+                st.caption("着順を入力し、下の「更新ボタン」を押すと集計されます。")
+                
+                display_df = st.session_state['analyzed_df'].copy()
+                
+                edited_df = st.data_editor(
+                    display_df,
+                    column_config={
+                        "着順": st.column_config.NumberColumn(
+                            "着順", help="確定着順を入力 (1-18)", min_value=1, max_value=18, step=1, format="%d"
+                        ),
+                        "スコア": st.column_config.ProgressColumn(
+                            "重要度", format="%.1f", min_value=0, max_value=20,
+                        ),
+                    },
+                    disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
+                    hide_index=True,
+                    use_container_width=True,
+                    height=600,
+                    key="editor"
+                )
+                
+                # 更新ボタン
+                submit_btn = st.form_submit_button("🔄 着順を確定して更新")
+
+            # --- ボタンが押されたらデータを更新 ---
+            if submit_btn:
                 st.session_state['analyzed_df'] = edited_df
+                st.success("集計データを更新しました！")
 
             # ==========================================
-            # 4. リアルタイム集計
+            # 4. 集計 & グラフ (現在のセッションデータを使用)
             # ==========================================
             
-            df_hits = edited_df[edited_df['着順'].notna()].copy()
+            current_df = st.session_state['analyzed_df']
+            
+            df_hits = current_df[current_df['着順'].notna()].copy()
             df_hits['着順'] = pd.to_numeric(df_hits['着順'], errors='coerce')
             df_fuku = df_hits[df_hits['着順'] <= 3] # 3着内
 
@@ -358,7 +368,7 @@ if uploaded_file:
                         col_g1, col_g2 = st.columns([1, 1])
                         place_data = df_fuku[df_fuku['場名'] == place]
                         
-                        # パターン集計 (カンマ区切りを展開)
+                        # パターン集計
                         all_patterns = []
                         for p in place_data['パターン']:
                             if p: all_patterns.extend(p.split(','))
@@ -374,21 +384,19 @@ if uploaded_file:
                             
                             with col_g2:
                                 st.write(f"**{place} の的中詳細**")
-                                # ★修正ポイント: エラー原因だった列名を「属性」に修正
                                 st.dataframe(place_data[['R', '馬名', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
                         else:
                             st.info("パターンデータなし")
 
-                # --- 傾向スコア加算ロジック ---
+                # --- 傾向スコア加算 ---
                 st.markdown("### 📈 次レースの注目馬 (傾向加算)")
                 
-                # 的中したパターンを収集
                 hit_patterns = set()
                 for p in df_fuku['パターン']:
                     if p: hit_patterns.update(p.split(','))
                 
                 # 未出走馬
-                future_races = edited_df[edited_df['着順'].isna()].copy()
+                future_races = current_df[current_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
                     def calc_bonus(row_pat):
@@ -396,7 +404,8 @@ if uploaded_file:
                         pats = row_pat.split(',')
                         bonus = 0.0
                         for p in pats:
-                            if p in hit_patterns and len(p) == 1: # A-Zの1文字パターンのみ加点
+                            # A-Zの1文字パターンのみ加点対象 (青塗等は除外)
+                            if p in hit_patterns and len(p) == 1: 
                                 bonus += 2.0 
                         return bonus
 
@@ -421,4 +430,3 @@ if uploaded_file:
             st.warning("推奨馬が見つかりませんでした。")
     else:
         st.error("ファイルの読み込みに失敗しました。")
-
