@@ -9,7 +9,7 @@ import openpyxl
 st.set_page_config(page_title="配置馬券術 Web", layout="wide")
 
 # ==========================================
-# 1. 共通ロジック & データ読み込み（堅牢版）
+# 1. 共通ロジック & データ読み込み
 # ==========================================
 
 def to_half_width(text):
@@ -45,14 +45,12 @@ def load_data(file):
         except Exception as e:
             return pd.DataFrame(), f"Excel読み込みエラー: {e}"
             
-    # 2. CSVファイルの処理（堅牢なロジック）
+    # 2. CSVファイルの処理
     else:
-        # パターンA: UTF-8 で試行
         try:
             file.seek(0)
             df = pd.read_csv(file, encoding='utf-8', on_bad_lines='skip')
         except UnicodeDecodeError:
-            # パターンB: 失敗したら CP932 (Shift-JIS) で再試行
             try:
                 file.seek(0)
                 df = pd.read_csv(file, encoding='cp932', on_bad_lines='skip')
@@ -61,7 +59,7 @@ def load_data(file):
         except Exception as e:
             return pd.DataFrame(), f"CSV予期せぬエラー: {e}"
 
-    # --- ここからデータ整形ロジック（提示されたコードに準拠） ---
+    # --- データ整形 ---
     df.columns = df.columns.str.strip()
     
     rename_map = {
@@ -92,14 +90,17 @@ def load_data(file):
         else:
             df[col] = ''
             
-    potential_cols = ['R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
-    for col in potential_cols:
-        if col not in df.columns: df[col] = np.nan
-
-    return df[potential_cols].copy(), "success"
+    # 分析結果列も保持（保存データ読み込み用）
+    potential_cols = [
+        'R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数',
+        '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順', '傾向加点', '総合スコア'
+    ]
+    
+    existing_cols = [col for col in potential_cols if col in df.columns]
+    return df[existing_cols].copy(), "success"
 
 # ==========================================
-# 2. 配置計算・分析ロジック (提示コード準拠)
+# 2. 配置計算・分析ロジック
 # ==========================================
 
 def calc_haichi_numbers(df):
@@ -163,7 +164,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗 (Blue Paint)
+    # A. 青塗
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         group_keys = ['場名', col] if col == '騎手' else [col]
@@ -190,7 +191,7 @@ def analyze_logic(df_curr, df_prev=None):
                         blue_keys.add((row['場名'], row['R'], row['馬名']))
         except: continue
 
-    # B. 青塗の隣 (Blue Neighbor)
+    # B. 青塗の隣
     if blue_keys:
         for (place, race), group in df_curr.groupby(['場名', 'R']):
             group = group.sort_values('正番')
@@ -280,7 +281,6 @@ def analyze_logic(df_curr, df_prev=None):
         
     res_df = pd.DataFrame(rec_list)
     
-    # 同じ馬が複数の理由で選ばれた場合に集約してスコアを加算
     agg_funcs = {
         '属性': lambda x: ' + '.join(sorted(set(x))),
         'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), 
@@ -291,8 +291,6 @@ def analyze_logic(df_curr, df_prev=None):
     }
     
     res_df = res_df.groupby(['場名', 'R', '馬名'], as_index=False).agg(agg_funcs)
-    
-    # 並び替え: 場名 -> R -> スコアが高い順
     res_df = res_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
     
     if '着順' not in res_df.columns: res_df['着順'] = np.nan
@@ -303,85 +301,118 @@ def analyze_logic(df_curr, df_prev=None):
 # 3. Webアプリ画面 (Streamlit)
 # ==========================================
 
-st.title("🏇 配置馬券術 リアルタイム分析 (詳細スコア版)")
+st.title("🏇 配置馬券術 リアルタイム分析 (Place-Tab Ver)")
 
 # サイドバー
 with st.sidebar:
-    st.header("データ入力")
-    uploaded_file = st.file_uploader("当日データをアップロード", type=['xlsx', 'csv'])
+    st.header("1. データ入力")
+    uploaded_file = st.file_uploader("当日データをアップロード (または保存データ)", type=['xlsx', 'csv'])
     prev_file = st.file_uploader("前日データをアップロード (任意)", type=['xlsx', 'csv'])
+    
     st.markdown("---")
-    st.caption("前日データを入れると「前日同配置(騎手)」も判定します。")
+    st.header("2. データの保存")
+    st.caption("着順を入力した状態でここからCSVを保存し、次回読み込むと続きから再開できます。")
+    
+    if 'analyzed_df' in st.session_state and not st.session_state['analyzed_df'].empty:
+        csv = st.session_state['analyzed_df'].to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="💾 現在の状態を保存 (CSV)",
+            data=csv,
+            file_name="race_progress_save.csv",
+            mime="text/csv"
+        )
+    else:
+        st.button("💾 現在の状態を保存", disabled=True)
 
 if uploaded_file:
-    # 堅牢な読み込み
+    # データ読み込み
     df_raw, status = load_data(uploaded_file)
     df_prev, _ = load_data(prev_file) if prev_file else (None, None)
     
     if status != "success":
         st.error(status)
     else:
-        # 初回分析 (キャッシュ制御)
+        # 初回分析 or 復元
         if 'analyzed_df' not in st.session_state:
-            with st.spinner('全レース分析中...'):
-                result_df = analyze_logic(df_raw, df_prev)
-                if not result_df.empty:
-                    # 編集用ID
-                    result_df['id'] = result_df.index
-                    st.session_state['analyzed_df'] = result_df
-                else:
-                    st.session_state['analyzed_df'] = pd.DataFrame()
+            if 'パターン' in df_raw.columns and 'スコア' in df_raw.columns:
+                st.success("📂 保存データを検知しました。復元します。")
+                result_df = df_raw
+            else:
+                with st.spinner('全レース分析中...'):
+                    result_df = analyze_logic(df_raw, df_prev)
+
+            if not result_df.empty:
+                result_df['id'] = result_df.index
+                st.session_state['analyzed_df'] = result_df
+            else:
+                st.session_state['analyzed_df'] = pd.DataFrame()
 
         # --- メインエリア ---
         if not st.session_state['analyzed_df'].empty:
             
-            # --- 1. データエディタ (Formでラップ) ---
             st.subheader("📝 結果入力 & 推奨馬リスト")
+            st.info("開催場ごとのタブを切り替えて入力できます。入力後は必ず「更新ボタン」を押してください。")
             
+            # --- 開催場ごとのタブを作成 ---
+            full_df = st.session_state['analyzed_df'].copy()
+            places = sorted(full_df['場名'].unique())
+            
+            # フォーム開始
             with st.form("result_entry_form"):
-                st.caption("着順を入力し、下の「更新ボタン」を押すと集計されます。")
                 
-                display_df = st.session_state['analyzed_df'].copy()
+                # タブを作成
+                tabs = st.tabs(places)
+                edited_dfs = [] # 各タブの編集結果を格納するリスト
                 
-                edited_df = st.data_editor(
-                    display_df,
-                    column_config={
-                        "着順": st.column_config.NumberColumn(
-                            "着順", help="確定着順を入力 (1-18)", min_value=1, max_value=18, step=1, format="%d"
-                        ),
-                        "スコア": st.column_config.ProgressColumn(
-                            "注目度(スコア)", format="%.1f", min_value=0, max_value=20,
-                        ),
-                    },
-                    disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
-                    hide_index=True,
-                    use_container_width=True,
-                    height=600,
-                    key="editor"
-                )
+                for tab, place in zip(tabs, places):
+                    with tab:
+                        # この場所のデータだけ抽出
+                        place_df = full_df[full_df['場名'] == place]
+                        
+                        # データエディタを表示
+                        edited_chunk = st.data_editor(
+                            place_df,
+                            column_config={
+                                "着順": st.column_config.NumberColumn(
+                                    "着順", help="確定着順を入力 (1-18)", min_value=1, max_value=18, step=1, format="%d"
+                                ),
+                                "スコア": st.column_config.ProgressColumn(
+                                    "注目度", format="%.1f", min_value=0, max_value=20,
+                                ),
+                            },
+                            disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
+                            hide_index=True,
+                            use_container_width=True,
+                            height=500,
+                            key=f"editor_{place}" # キーを場所ごとに変える
+                        )
+                        edited_dfs.append(edited_chunk)
                 
-                # 更新ボタン
-                submit_btn = st.form_submit_button("🔄 着順を確定して更新")
+                # 更新ボタン（全タブ共通）
+                st.markdown("---")
+                submit_btn = st.form_submit_button("🔄 全タブの入力を確定して更新")
 
-            # --- ボタンが押されたらデータを更新 ---
+            # --- 更新処理 ---
             if submit_btn:
-                st.session_state['analyzed_df'] = edited_df
-                st.success("集計データを更新しました！")
+                # 全タブの編集結果を結合して保存
+                combined_df = pd.concat(edited_dfs, ignore_index=True)
+                # 並び順を維持（場名 -> R -> スコア）
+                combined_df = combined_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
+                st.session_state['analyzed_df'] = combined_df
+                st.success("すべてのデータを更新しました！")
 
             # ==========================================
-            # 4. 集計 & グラフ (現在のセッションデータを使用)
+            # 4. 集計 & グラフ
             # ==========================================
-            
             current_df = st.session_state['analyzed_df']
             
             df_hits = current_df[current_df['着順'].notna()].copy()
             df_hits['着順'] = pd.to_numeric(df_hits['着順'], errors='coerce')
-            df_fuku = df_hits[df_hits['着順'] <= 3] # 3着内
+            df_fuku = df_hits[df_hits['着順'] <= 3] 
 
             st.divider()
             st.subheader("📊 リアルタイム傾向分析")
 
-            # 指標
             c1, c2, c3 = st.columns(3)
             with c1: st.metric("消化レース", len(df_hits['R'].unique()))
             with c2: 
@@ -390,19 +421,18 @@ if uploaded_file:
             with c3: st.metric("的中数", f"{len(df_fuku)} 頭")
 
             if not df_fuku.empty:
-                # 開催場ごとにタブ分け
-                places = sorted(df_fuku['場名'].unique())
-                tabs = st.tabs(places)
+                # グラフ用にもタブ分け
+                graph_places = sorted(df_fuku['場名'].unique())
+                g_tabs = st.tabs(graph_places)
                 
-                for tab, place in zip(tabs, places):
-                    with tab:
+                for g_tab, place in zip(g_tabs, graph_places):
+                    with g_tab:
                         col_g1, col_g2 = st.columns([1, 1])
                         place_data = df_fuku[df_fuku['場名'] == place]
                         
-                        # パターン集計
                         all_patterns = []
                         for p in place_data['パターン']:
-                            if p: all_patterns.extend(p.split(','))
+                            if p: all_patterns.extend(str(p).split(','))
                         
                         if all_patterns:
                             pat_counts = pd.Series(all_patterns).value_counts().reset_index()
@@ -410,7 +440,7 @@ if uploaded_file:
                             
                             with col_g1:
                                 fig = px.pie(pat_counts, values='的中数', names='パターン', 
-                                             title=f'【{place}】 的中パターンの内訳', hole=0.4)
+                                             title=f'【{place}】 的中パターン', hole=0.4)
                                 st.plotly_chart(fig, use_container_width=True)
                             
                             with col_g2:
@@ -424,18 +454,16 @@ if uploaded_file:
                 
                 hit_patterns = set()
                 for p in df_fuku['パターン']:
-                    if p: hit_patterns.update(p.split(','))
+                    if p: hit_patterns.update(str(p).split(','))
                 
-                # 未出走馬
                 future_races = current_df[current_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
                     def calc_bonus(row_pat):
-                        if not row_pat: return 0.0
-                        pats = row_pat.split(',')
+                        if not row_pat or pd.isna(row_pat): return 0.0
+                        pats = str(row_pat).split(',')
                         bonus = 0.0
                         for p in pats:
-                            # A-Zの1文字パターンのみ加点対象 (青塗等は除外)
                             if p in hit_patterns and len(p) == 1: 
                                 bonus += 2.0 
                         return bonus
@@ -443,7 +471,6 @@ if uploaded_file:
                     future_races['傾向加点'] = future_races['パターン'].apply(calc_bonus)
                     future_races['総合スコア'] = future_races['スコア'] + future_races['傾向加点']
                     
-                    # 傾向加点がついた馬を上位表示
                     hot_horses = future_races[future_races['傾向加点'] > 0].sort_values(['場名', 'R', '総合スコア'], ascending=[True, True, False])
                     
                     if not hot_horses.empty:
