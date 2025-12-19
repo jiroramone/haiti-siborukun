@@ -90,20 +90,27 @@ def load_data(file):
         else:
             df[col] = ''
             
-    # 分析結果列も保持（保存データ読み込み用）
-    potential_cols = [
-        'R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数',
-        '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順', '傾向加点', '総合スコア'
-    ]
+    # ★ここを修正: 分析に必要な必須列がなければ空(NaN)で作る
+    required_cols = ['R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # 保存データ用の列 (存在する場合のみ維持)
+    save_cols = ['属性', 'タイプ', 'パターン', '条件', 'スコア', '着順', '傾向加点', '総合スコア']
+    existing_save_cols = [c for c in save_cols if c in df.columns]
     
-    existing_cols = [col for col in potential_cols if col in df.columns]
-    return df[existing_cols].copy(), "success"
+    # 最終的な列リスト
+    final_cols = required_cols + existing_save_cols
+    
+    return df[final_cols].copy(), "success"
 
 # ==========================================
 # 2. 配置計算・分析ロジック
 # ==========================================
 
 def calc_haichi_numbers(df):
+    # 必須列があるか確認（load_dataで作っているのでエラーにならないはず）
     if df[['逆番', '正循環', '逆循環']].notna().all().all():
         df['計算_逆番'] = df['逆番']
         df['計算_正循環'] = df['正循環']
@@ -384,7 +391,7 @@ if uploaded_file:
                             hide_index=True,
                             use_container_width=True,
                             height=500,
-                            key=f"editor_{place}" # キーを場所ごとに変える
+                            key=f"editor_{place}"
                         )
                         edited_dfs.append(edited_chunk)
                 
@@ -396,7 +403,6 @@ if uploaded_file:
             if submit_btn:
                 # 全タブの編集結果を結合して保存
                 combined_df = pd.concat(edited_dfs, ignore_index=True)
-                # 並び順を維持（場名 -> R -> スコア）
                 combined_df = combined_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
                 st.session_state['analyzed_df'] = combined_df
                 st.success("すべてのデータを更新しました！")
