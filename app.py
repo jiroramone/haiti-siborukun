@@ -13,6 +13,8 @@ st.set_page_config(page_title="配置馬券術 Web", layout="wide")
 # ==========================================
 
 def to_half_width(text):
+    if isinstance(text, (list, pd.Series, np.ndarray)):
+        text = str(text)
     if pd.isna(text): return text
     text = str(text)
     table = str.maketrans('０１２３４５６７８９', '0123456789')
@@ -62,13 +64,19 @@ def load_data(file):
     # --- データ整形 ---
     df.columns = df.columns.str.strip()
     
+    # ★修正: カラム名のバリエーション対応を強化
     rename_map = {
         '場所': '場名', '開催': '場名', '単オッズ': '単ｵｯｽﾞ', 
-        '調教師': '厩舎', '調教師名': '厩舎', '騎手名': '騎手',
+        '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎', # 追加
+        '騎手名': '騎手',
         'レース': 'R', 'Ｒ': 'R', 'レース名': 'R',
         '着': '着順', '着 順': '着順', '番': '正番', '馬番': '正番'
     }
     df = df.rename(columns=rename_map)
+
+    # 重複カラムの削除
+    df = df.loc[:, ~df.columns.duplicated()]
+
     if '場名' not in df.columns: df['場名'] = 'Unknown'
 
     target_numeric_cols = ['R', '正番', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
@@ -90,17 +98,16 @@ def load_data(file):
         else:
             df[col] = ''
             
-    # ★ここを修正: 分析に必要な必須列がなければ空(NaN)で作る
+    # 必須列確保
     required_cols = ['R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
     for col in required_cols:
         if col not in df.columns:
             df[col] = np.nan
 
-    # 保存データ用の列 (存在する場合のみ維持)
+    # 保存データ用の列
     save_cols = ['属性', 'タイプ', 'パターン', '条件', 'スコア', '着順', '傾向加点', '総合スコア']
     existing_save_cols = [c for c in save_cols if c in df.columns]
     
-    # 最終的な列リスト
     final_cols = required_cols + existing_save_cols
     
     return df[final_cols].copy(), "success"
@@ -110,8 +117,8 @@ def load_data(file):
 # ==========================================
 
 def calc_haichi_numbers(df):
-    # 必須列があるか確認（load_dataで作っているのでエラーにならないはず）
-    if df[['逆番', '正循環', '逆循環']].notna().all().all():
+    check_cols = ['逆番', '正循環', '逆循環']
+    if set(check_cols).issubset(df.columns) and df[check_cols].notna().all().all():
         df['計算_逆番'] = df['逆番']
         df['計算_正循環'] = df['正循環']
         df['計算_逆循環'] = df['逆循環']
@@ -171,19 +178,28 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗
+    # A. 青塗 (騎手・厩舎・馬主)
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
-        group_keys = ['場名', col] if col == '騎手' else [col]
+        # データ内にその列が存在する場合のみ処理
+        if col not in df_curr.columns: continue
+        
+        # ★修正: 厩舎や馬主も「場名」で区切って集計するように変更 (Global判定からLocal判定へ)
+        group_keys = ['場名', col]
+        
         try:
             for name, group in df_curr.groupby(group_keys):
                 if len(group) < 2: continue
-                target_name = name[1] if isinstance(name, tuple) else name
+                # groupbyの結果、nameは ('東京', '池江') のようなタプルになる
+                target_name = name[1]
                 if not target_name: continue
+                
                 common_vals = get_common_values(group)
                 if common_vals:
                     all_races = sorted(group['R'].unique())
+                    # 優先度（スコア加算）
                     priority = 0.3 if col == '騎手' else (0.2 if col == '厩舎' else 0.1)
+                    
                     for _, row in group.iterrows():
                         other_races = [str(r) for r in all_races if r != row['R']]
                         remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}R]'
@@ -219,26 +235,27 @@ def analyze_logic(df_curr, df_prev=None):
                             })
 
     # C. 通常ペア (騎手)
-    for name, group in df_curr.groupby('騎手'):
-        if len(group) < 2: continue
-        group = group.sort_values('R').to_dict('records')
-        for i in range(len(group)-1):
-            curr, next_r = group[i], group[i+1]
-            if curr['場名'] != next_r['場名']: continue
-            pat = get_pair_pattern(curr, next_r)
-            if pat:
-                label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
-                base_score = 4.0 if label.startswith("◎") else 3.0
-                rec_list.append({
-                    '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
-                    '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
-                    '条件': f"[騎手] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 0.3
-                })
-                rec_list.append({
-                    '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
-                    '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
-                    '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
-                })
+    if '騎手' in df_curr.columns:
+        for name, group in df_curr.groupby('騎手'):
+            if len(group) < 2: continue
+            group = group.sort_values('R').to_dict('records')
+            for i in range(len(group)-1):
+                curr, next_r = group[i], group[i+1]
+                if curr['場名'] != next_r['場名']: continue
+                pat = get_pair_pattern(curr, next_r)
+                if pat:
+                    label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
+                    base_score = 4.0 if label.startswith("◎") else 3.0
+                    rec_list.append({
+                        '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
+                        '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
+                        '条件': f"[騎手] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 0.3
+                    })
+                    rec_list.append({
+                        '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
+                        '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
+                        '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
+                    })
 
     # C. 通常ペア (厩舎)
     if '厩舎' in df_curr.columns:
@@ -341,6 +358,7 @@ if uploaded_file:
     else:
         # 初回分析 or 復元
         if 'analyzed_df' not in st.session_state:
+            # 必須列チェック（パターンとスコアがある＝保存データ）
             if 'パターン' in df_raw.columns and 'スコア' in df_raw.columns:
                 st.success("📂 保存データを検知しました。復元します。")
                 result_df = df_raw
@@ -402,10 +420,11 @@ if uploaded_file:
             # --- 更新処理 ---
             if submit_btn:
                 # 全タブの編集結果を結合して保存
-                combined_df = pd.concat(edited_dfs, ignore_index=True)
-                combined_df = combined_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
-                st.session_state['analyzed_df'] = combined_df
-                st.success("すべてのデータを更新しました！")
+                if edited_dfs:
+                    combined_df = pd.concat(edited_dfs, ignore_index=True)
+                    combined_df = combined_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
+                    st.session_state['analyzed_df'] = combined_df
+                    st.success("すべてのデータを更新しました！")
 
             # ==========================================
             # 4. 集計 & グラフ
