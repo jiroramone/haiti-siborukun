@@ -13,10 +13,6 @@ st.set_page_config(page_title="配置馬券術 Web", layout="wide")
 # ==========================================
 
 def to_half_width(text):
-    # エラー回避のための安全策：リストやシリーズが渡された場合は文字列化して処理
-    if isinstance(text, (list, pd.Series, np.ndarray)):
-        text = str(text)
-        
     if pd.isna(text): return text
     text = str(text)
     table = str.maketrans('０１２３４５６７８９', '0123456789')
@@ -73,14 +69,6 @@ def load_data(file):
         '着': '着順', '着 順': '着順', '番': '正番', '馬番': '正番'
     }
     df = df.rename(columns=rename_map)
-
-    # ========================================================
-    # ★修正ポイント: 重複カラムの削除
-    # 同じ名前のカラム（例: 元々「レース」と「R」があって両方「R」になった場合など）
-    # があるとエラーになるため、重複を除去して最初の1つだけ残す
-    # ========================================================
-    df = df.loc[:, ~df.columns.duplicated()]
-
     if '場名' not in df.columns: df['場名'] = 'Unknown'
 
     target_numeric_cols = ['R', '正番', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
@@ -102,20 +90,27 @@ def load_data(file):
         else:
             df[col] = ''
             
-    # 分析結果列も保持（保存データ読み込み用）
-    potential_cols = [
-        'R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数',
-        '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順', '傾向加点', '総合スコア'
-    ]
+    # ★ここを修正: 分析に必要な必須列がなければ空(NaN)で作る
+    required_cols = ['R', '場名', '馬名', '正番', '騎手', '厩舎', '馬主', '単ｵｯｽﾞ', '逆番', '正循環', '逆循環', '頭数']
+    for col in required_cols:
+        if col not in df.columns:
+            df[col] = np.nan
+
+    # 保存データ用の列 (存在する場合のみ維持)
+    save_cols = ['属性', 'タイプ', 'パターン', '条件', 'スコア', '着順', '傾向加点', '総合スコア']
+    existing_save_cols = [c for c in save_cols if c in df.columns]
     
-    existing_cols = [col for col in potential_cols if col in df.columns]
-    return df[existing_cols].copy(), "success"
+    # 最終的な列リスト
+    final_cols = required_cols + existing_save_cols
+    
+    return df[final_cols].copy(), "success"
 
 # ==========================================
 # 2. 配置計算・分析ロジック
 # ==========================================
 
 def calc_haichi_numbers(df):
+    # 必須列があるか確認（load_dataで作っているのでエラーにならないはず）
     if df[['逆番', '正循環', '逆循環']].notna().all().all():
         df['計算_逆番'] = df['逆番']
         df['計算_正循環'] = df['正循環']
@@ -491,4 +486,9 @@ if uploaded_file:
                             use_container_width=True,
                             hide_index=True
                         )
-                    
+                    else:
+                        st.info("現時点では、特定の傾向に合致する未出走馬はありません。")
+            else:
+                st.info("まだ的中データがありません。着順を入力してください。")
+        else:
+            st.warning("推奨馬が見つかりませんでした。")
