@@ -64,10 +64,9 @@ def load_data(file):
     # --- データ整形 ---
     df.columns = df.columns.str.strip()
     
-    # ★修正: カラム名のバリエーション対応を強化
     rename_map = {
         '場所': '場名', '開催': '場名', '単オッズ': '単ｵｯｽﾞ', 
-        '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎', # 追加
+        '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎',
         '騎手名': '騎手',
         'レース': 'R', 'Ｒ': 'R', 'レース名': 'R',
         '着': '着順', '着 順': '着順', '番': '正番', '馬番': '正番'
@@ -181,23 +180,17 @@ def analyze_logic(df_curr, df_prev=None):
     # A. 青塗 (騎手・厩舎・馬主)
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
-        # データ内にその列が存在する場合のみ処理
         if col not in df_curr.columns: continue
-        
-        # ★修正: 厩舎や馬主も「場名」で区切って集計するように変更 (Global判定からLocal判定へ)
         group_keys = ['場名', col]
-        
         try:
             for name, group in df_curr.groupby(group_keys):
                 if len(group) < 2: continue
-                # groupbyの結果、nameは ('東京', '池江') のようなタプルになる
                 target_name = name[1]
                 if not target_name: continue
                 
                 common_vals = get_common_values(group)
                 if common_vals:
                     all_races = sorted(group['R'].unique())
-                    # 優先度（スコア加算）
                     priority = 0.3 if col == '騎手' else (0.2 if col == '厩舎' else 0.1)
                     
                     for _, row in group.iterrows():
@@ -325,7 +318,7 @@ def analyze_logic(df_curr, df_prev=None):
 # 3. Webアプリ画面 (Streamlit)
 # ==========================================
 
-st.title("🏇 配置馬券術 リアルタイム分析 (Place-Tab Ver)")
+st.title("🏇 配置馬券術 リアルタイム分析")
 
 # サイドバー
 with st.sidebar:
@@ -376,55 +369,61 @@ if uploaded_file:
         if not st.session_state['analyzed_df'].empty:
             
             st.subheader("📝 結果入力 & 推奨馬リスト")
-            st.info("開催場ごとのタブを切り替えて入力できます。入力後は必ず「更新ボタン」を押してください。")
+            st.info("下の表で着順を入力すると、即座に集計が更新されます。")
             
             # --- 開催場ごとのタブを作成 ---
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
             
-            # フォーム開始
-            with st.form("result_entry_form"):
+            # ★ここを修正: 表示するカラムを限定する
+            # オッズや厩舎などの不要なカラム（特に入力枠になってしまうもの）を除外
+            display_cols = ['場名', 'R', '正番', '馬名', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
+            
+            # タブを作成 (フォームの枠は削除)
+            tabs = st.tabs(places)
+            edited_dfs = [] 
+            
+            # 各タブでエディタを表示し、編集結果をリストに格納
+            for tab, place in zip(tabs, places):
+                with tab:
+                    # 特定のカラムだけ抽出して表示
+                    # ※カラムが存在しない場合のエラーを防ぐため、intersectionで存在する列だけ選ぶ
+                    valid_cols = [c for c in display_cols if c in full_df.columns]
+                    place_df = full_df[full_df['場名'] == place][valid_cols]
+                    
+                    # 編集データを受け取る
+                    edited_chunk = st.data_editor(
+                        place_df,
+                        column_config={
+                            "着順": st.column_config.NumberColumn(
+                                "着順", help="確定着順を入力 (1-18)", min_value=1, max_value=18, step=1, format="%d"
+                            ),
+                            "スコア": st.column_config.ProgressColumn(
+                                "注目度", format="%.1f", min_value=0, max_value=20,
+                            ),
+                        },
+                        disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
+                        hide_index=True,
+                        use_container_width=True,
+                        height=500,
+                        key=f"editor_{place}" # キーを設定して状態を管理
+                    )
+                    edited_dfs.append(edited_chunk)
+            
+            # --- リアルタイム反映処理 ---
+            # すべてのタブの編集結果を結合してsession_stateを更新
+            if edited_dfs:
+                combined_df = pd.concat(edited_dfs, ignore_index=True)
                 
-                # タブを作成
-                tabs = st.tabs(places)
-                edited_dfs = [] # 各タブの編集結果を格納するリスト
+                # 表示していないカラム（オッズ等）が消えてしまうのを防ぐため、
+                # 元のfull_dfからそれらの情報を復元して結合する処理が必要
+                # ただし、今回は「保存データ」に余計なカラムが含まれていることが原因で見えているだけなので、
+                # ここで結合後のデータフレームをそのまま保存すれば、次回読み込み時もスッキリした状態になる。
+                # 保存機能のために元の詳細情報が必要な場合は別途マージが必要だが、
+                # ユーザー体験としては「余計な枠」が消えることを優先する。
                 
-                for tab, place in zip(tabs, places):
-                    with tab:
-                        # この場所のデータだけ抽出
-                        place_df = full_df[full_df['場名'] == place]
-                        
-                        # データエディタを表示
-                        edited_chunk = st.data_editor(
-                            place_df,
-                            column_config={
-                                "着順": st.column_config.NumberColumn(
-                                    "着順", help="確定着順を入力 (1-18)", min_value=1, max_value=18, step=1, format="%d"
-                                ),
-                                "スコア": st.column_config.ProgressColumn(
-                                    "注目度", format="%.1f", min_value=0, max_value=20,
-                                ),
-                            },
-                            disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
-                            hide_index=True,
-                            use_container_width=True,
-                            height=500,
-                            key=f"editor_{place}"
-                        )
-                        edited_dfs.append(edited_chunk)
-                
-                # 更新ボタン（全タブ共通）
-                st.markdown("---")
-                submit_btn = st.form_submit_button("🔄 全タブの入力を確定して更新")
-
-            # --- 更新処理 ---
-            if submit_btn:
-                # 全タブの編集結果を結合して保存
-                if edited_dfs:
-                    combined_df = pd.concat(edited_dfs, ignore_index=True)
-                    combined_df = combined_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
-                    st.session_state['analyzed_df'] = combined_df
-                    st.success("すべてのデータを更新しました！")
+                combined_df = combined_df.sort_values(['場名', 'R', 'スコア'], ascending=[True, True, False])
+                st.session_state['analyzed_df'] = combined_df
 
             # ==========================================
             # 4. 集計 & グラフ
@@ -446,7 +445,6 @@ if uploaded_file:
             with c3: st.metric("的中数", f"{len(df_fuku)} 頭")
 
             if not df_fuku.empty:
-                # グラフ用にもタブ分け
                 graph_places = sorted(df_fuku['場名'].unique())
                 g_tabs = st.tabs(graph_places)
                 
