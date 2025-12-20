@@ -177,25 +177,51 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
+    # =========================================================
     # A. 青塗 (騎手・厩舎・馬主)
+    # =========================================================
     blue_keys = set()
+    
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
-        group_keys = ['場名', col]
+        
+        # ★修正: 「騎手」は場ごとに区切る（同日複数場にいない前提）
+        # ★修正: 「厩舎」「馬主」は場をまたいで一括判定（Global）
+        if col == '騎手':
+            group_keys = ['場名', col]
+        else:
+            group_keys = [col]
+        
         try:
-            for name, group in df_curr.groupby(group_keys):
+            for name_key, group in df_curr.groupby(group_keys):
                 if len(group) < 2: continue
-                target_name = name[1]
+                
+                # キーから名前を取得
+                if col == '騎手':
+                    # ('阪神', 'ルメール')
+                    target_name = name_key[1]
+                else:
+                    # '池江'
+                    target_name = name_key
+                
                 if not target_name: continue
                 
+                # 共通値判定 (Globalなので全場の馬でチェック)
                 common_vals = get_common_values(group)
                 if common_vals:
-                    all_races = sorted(group['R'].unique())
+                    # 全場のレース番号を取得 (例: 阪神1, 中山2...)
+                    # 表示用に "場名R" の形式でリスト化
+                    all_races_display = [f"{r['場名']}{r['R']}" for _, r in group.iterrows()]
                     priority = 0.3 if col == '騎手' else (0.2 if col == '厩舎' else 0.1)
                     
                     for _, row in group.iterrows():
-                        other_races = [str(r) for r in all_races if r != row['R']]
-                        remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}R]'
+                        current_race_str = f"{row['場名']}{row['R']}"
+                        other_races = [s for s in all_races_display if s != current_race_str]
+                        
+                        # 重複排除してソート
+                        other_races = sorted(list(set(other_races)))
+                        remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}]'
+                        
                         rec_list.append({
                             '場名': row['場名'], 'R': row['R'], '正番': row['正番'], '馬名': row['馬名'],
                             '属性': f"{col}:{target_name}", 
@@ -207,7 +233,9 @@ def analyze_logic(df_curr, df_prev=None):
                         blue_keys.add((row['場名'], row['R'], row['馬名']))
         except: continue
 
+    # =========================================================
     # B. 青塗の隣
+    # =========================================================
     if blue_keys:
         for (place, race), group in df_curr.groupby(['場名', 'R']):
             group = group.sort_values('正番')
@@ -227,9 +255,11 @@ def analyze_logic(df_curr, df_prev=None):
                                 'スコア': 9.0
                             })
 
-    # C. 通常ペア (騎手)
+    # =========================================================
+    # C. 通常ペア (騎手) - 騎手は場ごとに区切る
+    # =========================================================
     if '騎手' in df_curr.columns:
-        for name, group in df_curr.groupby('騎手'):
+        for (place, name), group in df_curr.groupby(['場名', '騎手']):
             if len(group) < 2: continue
             group = group.sort_values('R').to_dict('records')
             for i in range(len(group)-1):
@@ -250,36 +280,56 @@ def analyze_logic(df_curr, df_prev=None):
                         '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
                     })
 
-    # C. 通常ペア (厩舎)
-    if '厩舎' in df_curr.columns:
-        for (place, name), group in df_curr.groupby(['場名', '厩舎']):
+    # =========================================================
+    # C. 通常ペア (厩舎・馬主) - 場をまたいで一括判定 (Global Sequence)
+    # =========================================================
+    for col in ['厩舎', '馬主']:
+        if col not in df_curr.columns: continue
+        
+        for name, group in df_curr.groupby(col):
             if len(group) < 2: continue
-            group = group.sort_values('R').to_dict('records')
-            for i in range(len(group)):
-                for j in range(i+1, len(group)):
-                    curr, next_r = group[i], group[j]
-                    pat = get_pair_pattern(curr, next_r)
-                    if pat:
-                        label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
-                        base_score = 4.0 if label.startswith("◎") else 3.0
-                        rec_list.append({
-                            '場名': place, 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
-                            '属性': f"厩舎:{name}", 'タイプ': label, 'パターン': pat, 
-                            '条件': f"[厩舎] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 0.2
-                        })
-                        rec_list.append({
-                            '場名': place, 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
-                            '属性': f"厩舎:{name}", 'タイプ': label, 'パターン': pat, 
-                            '条件': f"[厩舎] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.2
-                        })
+            
+            # ★重要: 全場の馬を「R順」にソートして並べる
+            # ※同じRがある場合（阪神1R, 中山1R）の順序は不定だが、通常R順で時系列に近いとみなす
+            group = group.sort_values(['R', '場名']).to_dict('records')
+            
+            # 隣り合う馬同士（場が違ってもOK）でペア判定
+            for i in range(len(group)-1):
+                curr, next_r = group[i], group[i+1]
+                
+                pat = get_pair_pattern(curr, next_r)
+                if pat:
+                    label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
+                    base_score = 4.0 if label.startswith("◎") else 3.0
+                    
+                    # 相手の情報を条件に記載 (場名も含める)
+                    cond_curr = f"[{col}] ペア({next_r['場名']}{next_r['R']}R #{next_r['正番']})"
+                    cond_next = f"[{col}] ペア({curr['場名']}{curr['R']}R #{curr['正番']})"
+                    
+                    rec_list.append({
+                        '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
+                        '属性': f"{col}:{name}", 'タイプ': label, 'パターン': pat, 
+                        '条件': cond_curr, 'スコア': base_score + 0.2
+                    })
+                    rec_list.append({
+                        '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
+                        '属性': f"{col}:{name}", 'タイプ': label, 'パターン': pat, 
+                        '条件': cond_next, 'スコア': base_score + 0.2
+                    })
 
+    # =========================================================
     # D. 前日同配置 (騎手のみ)
+    # =========================================================
     if df_prev is not None and not df_prev.empty:
         for idx, row in df_curr.iterrows():
             race = row['R']
             name = row['騎手']
             if not name: continue
-            prev_rows = df_prev[(df_prev['R'] == race) & (df_prev['騎手'] == name)]
+            prev_rows = df_prev[
+                (df_prev['場名'] == row['場名']) & 
+                (df_prev['R'] == race) & 
+                (df_prev['騎手'] == name)
+            ]
             for _, p_row in prev_rows.iterrows():
                 is_seiban = (p_row['正番'] == row['正番'])
                 is_gyaku = (p_row['計算_逆番'] == row['計算_逆番'])
@@ -375,7 +425,7 @@ if uploaded_file:
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
             
-            # 表示するカラムを限定（オッズ等の不要な入力を防ぐ）
+            # 表示するカラムを限定
             display_cols = ['場名', 'R', '正番', '馬名', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             # ★フォーム開始（更新ボタンのため）
