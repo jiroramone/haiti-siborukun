@@ -394,6 +394,7 @@ if uploaded_file:
     else:
         # 初回分析 or 復元
         if 'analyzed_df' not in st.session_state:
+            # 必須列チェック（パターンとスコアがある＝保存データ）
             if 'パターン' in df_raw.columns and 'スコア' in df_raw.columns:
                 st.success("📂 保存データを検知しました。復元します。")
                 result_df = df_raw
@@ -469,6 +470,7 @@ if uploaded_file:
             st.divider()
             st.subheader("📊 リアルタイム傾向分析")
 
+            # ★修正: 着順入力が1つでもあれば表示する（全敗でも表示）
             if not df_hits.empty:
                 c1, c2, c3 = st.columns(3)
                 with c1: st.metric("消化レース", len(df_hits['R'].unique()))
@@ -477,17 +479,22 @@ if uploaded_file:
                     st.metric("推奨馬 複勝率", f"{rate:.1f}%")
                 with c3: st.metric("的中数", f"{len(df_fuku)} 頭")
 
-                if not df_fuku.empty:
-                    graph_places = sorted(df_fuku['場名'].unique())
-                    g_tabs = st.tabs(graph_places)
-                    
-                    for g_tab, place in zip(g_tabs, graph_places):
-                        with g_tab:
-                            col_g1, col_g2 = st.columns([1, 1])
-                            place_data = df_fuku[df_fuku['場名'] == place]
-                            
+                # グラフタブ（的中がなくても表示し、リストを見せる）
+                graph_places = sorted(df_hits['場名'].unique()) # 入力があった場を表示
+                g_tabs = st.tabs(graph_places)
+                
+                for g_tab, place in zip(g_tabs, graph_places):
+                    with g_tab:
+                        col_g1, col_g2 = st.columns([1, 1])
+                        # この場所の全結果
+                        place_hits = df_hits[df_hits['場名'] == place]
+                        # この場所の的中
+                        place_fuku = df_fuku[df_fuku['場名'] == place]
+                        
+                        # パターン円グラフ (的中がある場合のみ)
+                        if not place_fuku.empty:
                             all_patterns = []
-                            for p in place_data['パターン']:
+                            for p in place_fuku['パターン']:
                                 if p: all_patterns.extend(str(p).split(','))
                             
                             if all_patterns:
@@ -498,16 +505,17 @@ if uploaded_file:
                                     fig = px.pie(pat_counts, values='的中数', names='パターン', 
                                                  title=f'【{place}】 的中パターン', hole=0.4)
                                     st.plotly_chart(fig, use_container_width=True)
-                                
-                                with col_g2:
-                                    st.write(f"**{place} の的中詳細**")
-                                    st.dataframe(place_data[['R', '馬名', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
                             else:
-                                st.info("パターンデータなし")
-                else:
-                    st.info("的中データはありません（全敗）")
+                                with col_g1: st.info("パターン集計なし")
+                        else:
+                            with col_g1: st.warning("この開催場での的中はまだありません。")
+                        
+                        # 結果リスト (勝敗に関わらず表示)
+                        with col_g2:
+                            st.write(f"**{place} のレース結果一覧**")
+                            st.dataframe(place_hits[['R', '馬名', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
 
-                # --- 傾向スコア加算 & 次レース表示 (修正版) ---
+                # --- 傾向スコア加算 & 次レース表示 ---
                 st.markdown("### 📈 次レースの注目馬 (傾向加算)")
                 
                 hit_patterns = set()
@@ -541,22 +549,21 @@ if uploaded_file:
                                 place_future = future_races[future_races['場名'] == place]
                                 
                                 # 次のレース（最小のR）を取得
-                                next_r = place_future['R'].min()
-                                
-                                # そのレースだけ抽出
-                                target_df = place_future[place_future['R'] == next_r]
-                                target_df = target_df.sort_values('総合スコア', ascending=False)
-                                
-                                st.markdown(f"**{place} {next_r}R の推奨馬**")
-                                
-                                if not target_df.empty:
+                                if not place_future.empty:
+                                    next_r = place_future['R'].min()
+                                    
+                                    # そのレースだけ抽出
+                                    target_df = place_future[place_future['R'] == next_r]
+                                    target_df = target_df.sort_values('総合スコア', ascending=False)
+                                    
+                                    st.markdown(f"**{place} {next_r}R の推奨馬**")
                                     st.dataframe(
                                         target_df[['R', '馬名', 'タイプ', 'パターン', 'スコア', '傾向加点', '総合スコア']],
                                         use_container_width=True,
                                         hide_index=True
                                     )
                                 else:
-                                    st.info(f"推奨馬なし")
+                                    st.info("残りレースはありません")
                     else:
                         st.info("全てのレースが終了しました。")
                 else:
