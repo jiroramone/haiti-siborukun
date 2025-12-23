@@ -177,7 +177,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗 (Global - 厩舎/馬主は全場一括, 騎手はLocal)
+    # A. 青塗
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
@@ -530,19 +530,19 @@ if uploaded_file:
                             if p in hit_patterns and len(p) == 1: 
                                 bonus += 2.0 
                         
-                        # 2. 青塗処理
+                        # 2. 青塗処理 (隣ヒットによる減点)
                         if '青' in pats:
-                            # 隣ヒットによる減点
                             my_attrs = str(row.get('属性', ''))
                             for bad_attr in downgraded_attrs:
                                 if bad_attr in my_attrs:
                                     bonus -= 3.0
                                     break
-                            
-                            # ★修正: オッズによる減点 (49.9倍以下ならペナルティ)
-                            odds = row.get('単ｵｯｽﾞ', np.nan)
-                            if pd.notna(odds) and odds <= 49.9:
-                                bonus -= 3.0
+                        
+                        # 3. 高オッズによる減点（全パターン共通）
+                        # ★修正: 青塗に限らず、ペア・前日など全てにおいて50倍以上は減点
+                        odds = row.get('単ｵｯｽﾞ', np.nan)
+                        if pd.notna(odds) and odds > 49.9:
+                            bonus -= 5.0
                                 
                         return bonus
 
