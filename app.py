@@ -420,7 +420,7 @@ if uploaded_file:
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
             
-            # ★修正: 表示カラムに「単ｵｯｽﾞ」を追加
+            # ★表示カラムに「単ｵｯｽﾞ」を追加
             display_cols = ['場名', 'R', '正番', '馬名', '単ｵｯｽﾞ', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             with st.form("result_entry_form"):
