@@ -177,7 +177,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗
+    # A. 青塗 (Global)
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
@@ -389,38 +389,30 @@ if uploaded_file:
         if not st.session_state['analyzed_df'].empty:
             
             st.subheader("📝 結果入力 & 推奨馬リスト")
-            st.info("開催場ごとのタブを切り替えて入力し、最後に「更新ボタン」を押してください。")
+            st.info("開催場 > レース番号 の順にタブを切り替えて結果を入力してください。")
             
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
             display_cols = ['場名', 'R', '正番', '馬名', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             with st.form("result_entry_form"):
-                tabs = st.tabs(places)
+                place_tabs = st.tabs(places)
                 edited_dfs = [] 
                 
-                for tab, place in zip(tabs, places):
-                    with tab:
-                        valid_cols = [c for c in display_cols if c in full_df.columns]
-                        place_df = full_df[full_df['場名'] == place][valid_cols]
-                        
+                for p_tab, place in zip(place_tabs, places):
+                    with p_tab:
+                        place_df = full_df[full_df['場名'] == place]
                         race_list = sorted(place_df['R'].unique())
                         if race_list:
                             r_tabs = st.tabs([f"{r}R" for r in race_list])
-                            
                             for r_tab, r_num in zip(r_tabs, race_list):
                                 with r_tab:
-                                    race_data = place_df[place_df['R'] == r_num]
-                                    
+                                    race_data = place_df[place_df['R'] == r_num][valid_cols := [c for c in display_cols if c in full_df.columns]]
                                     edited_chunk = st.data_editor(
                                         race_data,
                                         column_config={
-                                            "着順": st.column_config.NumberColumn(
-                                                "着順", help="確定着順を入力", min_value=1, max_value=18, step=1, format="%d"
-                                            ),
-                                            "スコア": st.column_config.ProgressColumn(
-                                                "注目度", format="%.1f", min_value=0, max_value=20,
-                                            ),
+                                            "着順": st.column_config.NumberColumn("着順", format="%d", min_value=1, max_value=18),
+                                            "スコア": st.column_config.ProgressColumn("注目度", format="%.1f", min_value=0, max_value=20)
                                         },
                                         disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
                                         hide_index=True,
@@ -431,7 +423,7 @@ if uploaded_file:
                                     edited_dfs.append(edited_chunk)
                 
                 st.markdown("---")
-                submit_btn = st.form_submit_button("🔄 全タブの入力を確定して更新")
+                submit_btn = st.form_submit_button("🔄 全レースの入力を確定して更新")
 
             if submit_btn:
                 if edited_dfs:
@@ -514,6 +506,9 @@ if uploaded_file:
                 future_races = current_df[current_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
+                    # ★修正: レースごとのスコア順位を計算
+                    future_races['レース内順位'] = future_races.groupby(['場名', 'R'])['総合スコア'].rank(method='min', ascending=False)
+
                     def calc_bonus(row):
                         row_pat = row.get('パターン', '')
                         if not row_pat or pd.isna(row_pat): return 0.0
@@ -530,22 +525,30 @@ if uploaded_file:
                                     break
                         return bonus
 
+                    # ★修正: 買い目ロジック（順位判定を追加）
                     def get_bet_recommendation(row):
                         score = row['総合スコア']
+                        rank_in_race = row['レース内順位']
                         pat_str = str(row.get('パターン', ''))
                         my_pats = pat_str.split(',')
                         matched = [p for p in my_pats if p in hit_patterns]
                         is_trend_horse = len(matched) > 0
                         is_blue = 'Blue' in my_pats
 
-                        if score >= 13: rank = "S"
-                        elif score >= 11: rank = "A"
-                        elif score >= 9: rank = "B"
+                        # スコア基準を厳格化
+                        if score >= 15: rank = "S"
+                        elif score >= 12: rank = "A"
+                        elif score >= 10: rank = "B"
                         elif is_blue: rank = "C"
                         else: rank = "D"
 
+                        # 順位によるフィルタ（2位以下ならランクダウン）
+                        if rank_in_race > 1:
+                            if rank == "S": rank = "A"
+                            elif rank == "A": rank = "B"
+                        
                         if rank == "S":
-                            return "🚀 鉄板級" if is_trend_horse else "◎ 不動軸"
+                            return "👑 盤石の軸" if is_trend_horse else "👑 鉄板級"
                         elif rank == "A":
                             return "✨ 傾向軸" if is_trend_horse else "◎ 軸候補"
                         elif rank == "B":
@@ -558,6 +561,9 @@ if uploaded_file:
 
                     future_races['傾向加点'] = future_races.apply(calc_bonus, axis=1)
                     future_races['総合スコア'] = future_races['スコア'] + future_races['傾向加点']
+                    
+                    # 再度ランク計算（加点後）
+                    future_races['レース内順位'] = future_races.groupby(['場名', 'R'])['総合スコア'].rank(method='min', ascending=False)
                     future_races['推奨買い目'] = future_races.apply(get_bet_recommendation, axis=1)
                     
                     future_places = sorted(future_races['場名'].unique())
@@ -589,9 +595,10 @@ if uploaded_file:
                                                 h2_score = h2['総合スコア']
                                                 h1_name = str(h1['馬名']).replace(':blue[**', '').replace('**]', '')
                                                 
-                                                if h1_score >= 12 and h2_score >= 9:
+                                                # 厳格化した基準での表示
+                                                if h1_score >= 15 and h2_score >= 12:
                                                     st.success(f"🔥 **{r_num}R 勝負レース**: {h1['正番']} - {h2['正番']} (ワイド・馬連)")
-                                                elif h1_score >= 12:
+                                                elif h1_score >= 15:
                                                     st.info(f"💡 **{r_num}R 単複推奨**: {h1['正番']} ({h1_name})")
                                                 else:
                                                     st.caption(f"🎲 {r_num}R は混戦模様です。")
