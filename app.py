@@ -64,12 +64,15 @@ def load_data(file):
     # --- データ整形 ---
     df.columns = df.columns.str.strip()
     
+    # 表記ゆれ吸収
     rename_map = {
-        '場所': '場名', '開催': '場名', '単オッズ': '単ｵｯｽﾞ', 
+        '場所': '場名', '開催': '場名', 
         '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎',
         '騎手名': '騎手',
         'レース': 'R', 'Ｒ': 'R', 'レース名': 'R',
-        '着': '着順', '着 順': '着順', '番': '正番', '馬番': '正番'
+        '着': '着順', '着 順': '着順', '番': '正番', '馬番': '正番',
+        # オッズのゆらぎ対応
+        '単オッズ': '単ｵｯｽﾞ', '単勝オッズ': '単ｵｯｽﾞ', 'オッズ': '単ｵｯｽﾞ', '単勝': '単ｵｯｽﾞ', '単': '単ｵｯｽﾞ'
     }
     df = df.rename(columns=rename_map)
 
@@ -246,7 +249,6 @@ def analyze_logic(df_curr, df_prev=None):
                             neighbor_odds = pd.to_numeric(t_row.get('単ｵｯｽﾞ'), errors='coerce')
                             neighbor_score = 9.0
                             
-                            # 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
                             if pd.notna(blue_odds) and pd.notna(neighbor_odds):
                                 if neighbor_odds < blue_odds:
                                     neighbor_score += 2.0
@@ -346,7 +348,7 @@ def analyze_logic(df_curr, df_prev=None):
     res_df = pd.DataFrame(rec_list)
     
     agg_funcs = {
-        '単ｵｯｽﾞ': 'min', 
+        '単ｵｯｽﾞ': 'min', # オッズを集計に追加
         '属性': lambda x: ' + '.join(sorted(set(x))),
         'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), 
         'パターン': lambda x: ','.join(sorted(set(x))),
@@ -417,7 +419,9 @@ if uploaded_file:
             
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
-            display_cols = ['場名', 'R', '正番', '馬名', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
+            
+            # ★修正: 表示カラムに「単ｵｯｽﾞ」を追加
+            display_cols = ['場名', 'R', '正番', '馬名', '単ｵｯｽﾞ', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             with st.form("result_entry_form"):
                 place_tabs = st.tabs(places)
@@ -436,9 +440,10 @@ if uploaded_file:
                                         race_data,
                                         column_config={
                                             "着順": st.column_config.NumberColumn("着順", format="%d", min_value=1, max_value=18),
-                                            "スコア": st.column_config.ProgressColumn("注目度", format="%.1f", min_value=0, max_value=20)
+                                            "スコア": st.column_config.ProgressColumn("注目度", format="%.1f", min_value=0, max_value=20),
+                                            "単ｵｯｽﾞ": st.column_config.NumberColumn("オッズ", format="%.1f")
                                         },
-                                        disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
+                                        disabled=["場名", "R", "馬名", "単ｵｯｽﾞ", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
                                         hide_index=True,
                                         use_container_width=True,
                                         height=300,
@@ -508,7 +513,7 @@ if uploaded_file:
                                     lambda x: f":blue[**{x['馬名']}**]" if '青' in str(x['パターン']) else x['馬名'], 
                                     axis=1
                                 )
-                                st.dataframe(place_hits_disp[['R', '馬名', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
+                                st.dataframe(place_hits_disp[['R', '馬名', '単ｵｯｽﾞ', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
 
                 # --- 傾向スコア加算 & 次レース表示 & 買い目 ---
                 st.markdown("### 📈 次レースの注目馬・推奨買い目")
