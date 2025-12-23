@@ -177,10 +177,11 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗
+    # A. 青塗 (Global - 厩舎/馬主は全場一括, 騎手はLocal)
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
+        
         if col == '騎手': group_keys = ['場名', col]
         else: group_keys = [col]
         try:
@@ -191,7 +192,10 @@ def analyze_logic(df_curr, df_prev=None):
                 common_vals = get_common_values(group)
                 if common_vals:
                     all_races_display = [f"{r['場名']}{r['R']}" for _, r in group.iterrows()]
-                    priority = 0.3 if col == '騎手' else (0.2 if col == '厩舎' else 0.1)
+                    
+                    # ★修正: 騎手はメイン(+1.0), 厩舎・馬主はサポート(+0.2)
+                    priority = 1.0 if col == '騎手' else 0.2
+                    
                     for _, row in group.iterrows():
                         current_race_str = f"{row['場名']}{row['R']}"
                         other_races = [s for s in all_races_display if s != current_race_str]
@@ -248,7 +252,7 @@ def analyze_logic(df_curr, df_prev=None):
                                 'スコア': 9.0
                             })
 
-    # C. 通常ペア (騎手)
+    # C. 通常ペア (騎手) - メイン要素
     if '騎手' in df_curr.columns:
         for (place, name), group in df_curr.groupby(['場名', '騎手']):
             if len(group) < 2: continue
@@ -259,20 +263,21 @@ def analyze_logic(df_curr, df_prev=None):
                 if pat:
                     label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
                     base_score = 4.0 if label.startswith("◎") else 3.0
+                    # ★修正: 騎手ペアは +1.0点 (強力)
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
                         '単ｵｯｽﾞ': curr.get('単ｵｯｽﾞ', np.nan),
                         '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
-                        '条件': f"[騎手] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 0.3
+                        '条件': f"[騎手] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 1.0
                     })
                     rec_list.append({
                         '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
                         '単ｵｯｽﾞ': next_r.get('単ｵｯｽﾞ', np.nan),
                         '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
-                        '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
+                        '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 1.0
                     })
 
-    # C. 通常ペア (厩舎・馬主)
+    # C. 通常ペア (厩舎・馬主) - サポート要素
     for col in ['厩舎', '馬主']:
         if col not in df_curr.columns: continue
         for name, group in df_curr.groupby(col):
@@ -286,6 +291,8 @@ def analyze_logic(df_curr, df_prev=None):
                     base_score = 4.0 if label.startswith("◎") else 3.0
                     cond_curr = f"[{col}] ペア({next_r['場名']}{next_r['R']}R #{next_r['正番']})"
                     cond_next = f"[{col}] ペア({curr['場名']}{curr['R']}R #{curr['正番']})"
+                    
+                    # ★修正: 厩舎・馬主ペアは +0.2点 (補助)
                     bonus = 0.2
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
@@ -333,7 +340,7 @@ def analyze_logic(df_curr, df_prev=None):
     res_df = pd.DataFrame(rec_list)
     
     agg_funcs = {
-        '単ｵｯｽﾞ': 'min', # オッズは最小値を採用(同じなら変わらない)
+        '単ｵｯｽﾞ': 'min', 
         '属性': lambda x: ' + '.join(sorted(set(x))),
         'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), 
         'パターン': lambda x: ','.join(sorted(set(x))),
@@ -599,12 +606,9 @@ if uploaded_file:
                                                 h2_score = h2['総合スコア']
                                                 h1_name = str(h1['馬名']).replace(':blue[**', '').replace('**]', '')
                                                 
-                                                # オッズ取得 (安全に)
                                                 h1_odds = h1.get('単ｵｯｽﾞ', np.nan)
                                                 odds_str = f"(単{h1_odds}倍)" if pd.notna(h1_odds) else "(オッズ不明)"
                                                 
-                                                # ★修正: オッズ判定ロジック
-                                                # Sランク(15点以上) かつ 順位1位
                                                 if h1_score >= 15:
                                                     if pd.notna(h1_odds):
                                                         if h1_odds >= 3.0:
@@ -620,9 +624,7 @@ if uploaded_file:
                                                 else:
                                                     st.caption(f"🎲 {r_num}R は混戦模様です。")
                                             
-                                            # オッズ列も表示
                                             disp_cols = ['R', '馬名', '単ｵｯｽﾞ', 'タイプ', 'パターン', 'スコア', '傾向加点', '総合スコア', '推奨買い目']
-                                            # カラムがあるか確認してから表示
                                             final_disp_cols = [c for c in disp_cols if c in target_df.columns]
                                             
                                             st.dataframe(
