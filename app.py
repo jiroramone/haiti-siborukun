@@ -249,6 +249,7 @@ def analyze_logic(df_curr, df_prev=None):
                             neighbor_odds = pd.to_numeric(t_row.get('単ｵｯｽﾞ'), errors='coerce')
                             neighbor_score = 9.0
                             
+                            # 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
                             if pd.notna(blue_odds) and pd.notna(neighbor_odds):
                                 if neighbor_odds < blue_odds:
                                     neighbor_score += 2.0
@@ -420,7 +421,6 @@ if uploaded_file:
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
             
-            # ★表示カラムに「単ｵｯｽﾞ」を追加
             display_cols = ['場名', 'R', '正番', '馬名', '単ｵｯｽﾞ', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             with st.form("result_entry_form"):
@@ -541,10 +541,10 @@ if uploaded_file:
                         pats = str(row_pat).split(',')
                         bonus = 0.0
                         
-                        # 1. ヒットパターン加点
+                        # 1. ヒットパターン加点 (★修正: +4.0に強化)
                         for p in pats:
                             if p in hit_patterns and len(p) == 1: 
-                                bonus += 2.0 
+                                bonus += 4.0 
                         
                         # 2. 青塗処理 (隣ヒットによる減点)
                         if '青' in pats:
