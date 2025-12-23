@@ -177,7 +177,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗 (Global)
+    # A. 青塗
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
@@ -237,21 +237,16 @@ def analyze_logic(df_curr, df_prev=None):
                 curr_num = int(b_row['正番'])
                 source_attr = b_info['属性']
                 
-                # ★修正: 青塗本体のオッズを取得
                 blue_odds = pd.to_numeric(b_row.get('単ｵｯｽﾞ'), errors='coerce')
                 
                 for t_num in [curr_num - 1, curr_num + 1]:
                     if t_num in umaban_map:
                         t_row = umaban_map[t_num]
                         if t_row['馬名'] not in blue_horse_names:
-                            # 隣の馬のオッズを取得
                             neighbor_odds = pd.to_numeric(t_row.get('単ｵｯｽﾞ'), errors='coerce')
-                            
-                            # 基本スコア
                             neighbor_score = 9.0
                             
-                            # ★修正: 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
-                            # 例: 隣が5倍、本体が20倍なら、隣に+2.0点して11.0点にする
+                            # 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
                             if pd.notna(blue_odds) and pd.notna(neighbor_odds):
                                 if neighbor_odds < blue_odds:
                                     neighbor_score += 2.0
@@ -554,10 +549,11 @@ if uploaded_file:
                                     bonus -= 3.0
                                     break
                         
-                        # 3. 高オッズによる減点（全パターン共通）
-                        odds = row.get('単ｵｯｽﾞ', np.nan)
+                        # 3. 高オッズによる減点（全パターン共通、50倍以上は圏外へ）
+                        # ★修正: 確実に数値変換してから判定
+                        odds = pd.to_numeric(row.get('単ｵｯｽﾞ'), errors='coerce')
                         if pd.notna(odds) and odds > 49.9:
-                            bonus -= 5.0
+                            bonus -= 30.0 # 強烈なペナルティ
                                 
                         return bonus
 
