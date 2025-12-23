@@ -177,7 +177,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗
+    # A. 青塗 (Global)
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
@@ -282,7 +282,7 @@ def analyze_logic(df_curr, df_prev=None):
                     bonus = 0.2
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
-                        '属性': f"{col}:{name}", 'タイプ': label, 'パターン': pat, 
+                        '属性': f""{col}:{name}", 'タイプ': label, 'パターン': pat, 
                         '条件': cond_curr, 'スコア': base_score + bonus
                     })
                     rec_list.append({
@@ -389,41 +389,55 @@ if uploaded_file:
         if not st.session_state['analyzed_df'].empty:
             
             st.subheader("📝 結果入力 & 推奨馬リスト")
-            st.info("開催場ごとのタブを切り替えて入力し、最後に「更新ボタン」を押してください。")
+            st.info("開催場 > レース番号 の順にタブを切り替えて結果を入力してください。")
             
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
             display_cols = ['場名', 'R', '正番', '馬名', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             with st.form("result_entry_form"):
-                tabs = st.tabs(places)
+                
+                # ★修正: 開催場タブ
+                place_tabs = st.tabs(places)
                 edited_dfs = [] 
                 
-                for tab, place in zip(tabs, places):
-                    with tab:
-                        valid_cols = [c for c in display_cols if c in full_df.columns]
-                        place_df = full_df[full_df['場名'] == place][valid_cols]
+                for p_tab, place in zip(place_tabs, places):
+                    with p_tab:
+                        # その場のデータを抽出
+                        place_df = full_df[full_df['場名'] == place]
                         
-                        edited_chunk = st.data_editor(
-                            place_df,
-                            column_config={
-                                "着順": st.column_config.NumberColumn(
-                                    "着順", help="確定着順を入力", min_value=1, max_value=18, step=1, format="%d"
-                                ),
-                                "スコア": st.column_config.ProgressColumn(
-                                    "注目度", format="%.1f", min_value=0, max_value=20,
-                                ),
-                            },
-                            disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
-                            hide_index=True,
-                            use_container_width=True,
-                            height=500,
-                            key=f"editor_{place}" 
-                        )
-                        edited_dfs.append(edited_chunk)
+                        # ★修正: レース番号でタブ分け
+                        race_list = sorted(place_df['R'].unique())
+                        if race_list:
+                            # 1R, 2R... のタブを作成
+                            r_tabs = st.tabs([f"{r}R" for r in race_list])
+                            
+                            for r_tab, r_num in zip(r_tabs, race_list):
+                                with r_tab:
+                                    # そのレースのデータを抽出
+                                    race_data = place_df[place_df['R'] == r_num][valid_cols := [c for c in display_cols if c in full_df.columns]]
+                                    
+                                    # データエディタ
+                                    edited_chunk = st.data_editor(
+                                        race_data,
+                                        column_config={
+                                            "着順": st.column_config.NumberColumn(
+                                                "着順", help="確定着順を入力", min_value=1, max_value=18, step=1, format="%d"
+                                            ),
+                                            "スコア": st.column_config.ProgressColumn(
+                                                "注目度", format="%.1f", min_value=0, max_value=20,
+                                            ),
+                                        },
+                                        disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
+                                        hide_index=True,
+                                        use_container_width=True,
+                                        height=300, # 高さを調整
+                                        key=f"editor_{place}_{r_num}" # キーをレース単位でユニークにする
+                                    )
+                                    edited_dfs.append(edited_chunk)
                 
                 st.markdown("---")
-                submit_btn = st.form_submit_button("🔄 全タブの入力を確定して更新")
+                submit_btn = st.form_submit_button("🔄 全レースの入力を確定して更新")
 
             if submit_btn:
                 if edited_dfs:
@@ -489,15 +503,13 @@ if uploaded_file:
                 # --- 傾向スコア加算 & 次レース表示 & 買い目 ---
                 st.markdown("### 📈 次レースの注目馬・推奨買い目")
                 
-                # 危険な属性抽出
                 downgraded_attrs = set()
-                hit_patterns = set() # トレンド
+                hit_patterns = set()
                 
                 if not df_fuku.empty:
                     for _, row in df_fuku.iterrows():
                         pats = str(row['パターン']).split(',')
                         hit_patterns.update(pats)
-                        
                         if 'BlueNeighbor' in str(row['パターン']):
                             found = re.findall(r'<(.*?)>', str(row['属性']))
                             downgraded_attrs.update(found)
@@ -513,13 +525,9 @@ if uploaded_file:
                         if not row_pat or pd.isna(row_pat): return 0.0
                         pats = str(row_pat).split(',')
                         bonus = 0.0
-                        
-                        # トレンド加点
                         for p in pats:
                             if p in hit_patterns and len(p) == 1: 
                                 bonus += 2.0 
-                        
-                        # 青塗ペナルティ
                         if 'Blue' in pats:
                             my_attrs = str(row.get('属性', ''))
                             for bad_attr in downgraded_attrs:
@@ -560,15 +568,12 @@ if uploaded_file:
                     
                     future_places = sorted(future_races['場名'].unique())
                     if future_places:
-                        # 開催場タブ
                         f_tabs = st.tabs(future_places)
                         
                         for tab, place in zip(f_tabs, future_places):
                             with tab:
                                 place_future = future_races[future_races['場名'] == place]
                                 if not place_future.empty:
-                                    
-                                    # ★修正: レース番号ごとのタブを作成 (全レース閲覧可)
                                     future_r_list = sorted(place_future['R'].unique())
                                     r_tabs = st.tabs([f"{r}R" for r in future_r_list])
                                     
@@ -577,13 +582,11 @@ if uploaded_file:
                                             target_df = place_future[place_future['R'] == r_num]
                                             target_df = target_df.sort_values('総合スコア', ascending=False)
                                             
-                                            # 馬名装飾
                                             target_df['馬名'] = target_df.apply(
                                                 lambda x: f":blue[**{x['馬名']}**]" if 'Blue' in str(x['パターン']) else x['馬名'], 
                                                 axis=1
                                             )
                                             
-                                            # 買い目提案エリア
                                             top_horses = target_df.head(3)
                                             if len(top_horses) >= 2:
                                                 h1 = top_horses.iloc[0]
@@ -592,7 +595,6 @@ if uploaded_file:
                                                 h2_score = h2['総合スコア']
                                                 h1_name = str(h1['馬名']).replace(':blue[**', '').replace('**]', '')
                                                 
-                                                # メッセージ作成
                                                 if h1_score >= 12 and h2_score >= 9:
                                                     st.success(f"🔥 **{r_num}R 勝負レース**: {h1['正番']} - {h2['正番']} (ワイド・馬連)")
                                                 elif h1_score >= 12:
