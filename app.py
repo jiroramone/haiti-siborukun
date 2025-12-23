@@ -197,11 +197,14 @@ def analyze_logic(df_curr, df_prev=None):
                         other_races = [s for s in all_races_display if s != current_race_str]
                         other_races = sorted(list(set(other_races)))
                         remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}]'
+                        # オッズも保持
+                        odds_val = row.get('単ｵｯｽﾞ', np.nan)
                         rec_list.append({
                             '場名': row['場名'], 'R': row['R'], '正番': row['正番'], '馬名': row['馬名'],
+                            '単ｵｯｽﾞ': odds_val,
                             '属性': f"{col}:{target_name}", 
                             'タイプ': f'★ {col}青塗', 
-                            'パターン': 'Blue', 
+                            'パターン': '青', 
                             '条件': remark,
                             'スコア': 9.0 + priority
                         })
@@ -234,11 +237,13 @@ def analyze_logic(df_curr, df_prev=None):
                     if t_num in umaban_map:
                         t_row = umaban_map[t_num]
                         if t_row['馬名'] not in blue_horse_names:
+                            odds_val = t_row.get('単ｵｯｽﾞ', np.nan)
                             rec_list.append({
                                 '場名': place, 'R': race, '正番': t_num, '馬名': t_row['馬名'],
+                                '単ｵｯｽﾞ': odds_val,
                                 '属性': f"(青塗隣) <{source_attr}>", 
                                 'タイプ': '△ 青塗の隣',
-                                'パターン': 'BlueNeighbor',
+                                'パターン': '青隣',
                                 '条件': f"青塗#{curr_num}({source_attr})の隣",
                                 'スコア': 9.0
                             })
@@ -256,11 +261,13 @@ def analyze_logic(df_curr, df_prev=None):
                     base_score = 4.0 if label.startswith("◎") else 3.0
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
+                        '単ｵｯｽﾞ': curr.get('単ｵｯｽﾞ', np.nan),
                         '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
                         '条件': f"[騎手] ペア({next_r['R']}R #{next_r['正番']})", 'スコア': base_score + 0.3
                     })
                     rec_list.append({
                         '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
+                        '単ｵｯｽﾞ': next_r.get('単ｵｯｽﾞ', np.nan),
                         '属性': f"騎手:{name}", 'タイプ': label, 'パターン': pat, 
                         '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
                     })
@@ -282,11 +289,13 @@ def analyze_logic(df_curr, df_prev=None):
                     bonus = 0.2
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
+                        '単ｵｯｽﾞ': curr.get('単ｵｯｽﾞ', np.nan),
                         '属性': f"{col}:{name}", 'タイプ': label, 'パターン': pat, 
                         '条件': cond_curr, 'スコア': base_score + bonus
                     })
                     rec_list.append({
                         '場名': next_r['場名'], 'R': next_r['R'], '正番': next_r['正番'], '馬名': next_r['馬名'],
+                        '単ｵｯｽﾞ': next_r.get('単ｵｯｽﾞ', np.nan),
                         '属性': f"{col}:{name}", 'タイプ': label, 'パターン': pat, 
                         '条件': cond_next, 'スコア': base_score + bonus
                     })
@@ -311,8 +320,9 @@ def analyze_logic(df_curr, df_prev=None):
                     
                     rec_list.append({
                         '場名': row['場名'], 'R': race, '正番': row['正番'], '馬名': row['馬名'],
+                        '単ｵｯｽﾞ': row.get('単ｵｯｽﾞ', np.nan),
                         '属性': f"騎手:{name}", 'タイプ': '★ 前日同配置', 
-                        'パターン': 'PrevDay',
+                        'パターン': '前日',
                         '条件': condition_text, 
                         'スコア': 8.3
                     })
@@ -323,6 +333,7 @@ def analyze_logic(df_curr, df_prev=None):
     res_df = pd.DataFrame(rec_list)
     
     agg_funcs = {
+        '単ｵｯｽﾞ': 'min', # オッズは最小値を採用(同じなら変わらない)
         '属性': lambda x: ' + '.join(sorted(set(x))),
         'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), 
         'パターン': lambda x: ','.join(sorted(set(x))),
@@ -481,7 +492,7 @@ if uploaded_file:
                                 st.write(f"**{place} の結果一覧**")
                                 place_hits_disp = place_hits.copy()
                                 place_hits_disp['馬名'] = place_hits_disp.apply(
-                                    lambda x: f":blue[**{x['馬名']}**]" if 'Blue' in str(x['パターン']) else x['馬名'], 
+                                    lambda x: f":blue[**{x['馬名']}**]" if '青' in str(x['パターン']) else x['馬名'], 
                                     axis=1
                                 )
                                 st.dataframe(place_hits_disp[['R', '馬名', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
@@ -496,18 +507,16 @@ if uploaded_file:
                     for _, row in df_fuku.iterrows():
                         pats = str(row['パターン']).split(',')
                         hit_patterns.update(pats)
-                        if 'BlueNeighbor' in str(row['パターン']):
+                        if '青隣' in str(row['パターン']):
                             found = re.findall(r'<(.*?)>', str(row['属性']))
                             downgraded_attrs.update(found)
                 
                 if downgraded_attrs:
-                    st.warning(f"⚠️ 以下の属性で「青塗の隣」が好走しました。該当する青塗本命馬の評価を下げます: {', '.join(downgraded_attrs)}")
+                    st.warning(f"⚠️ 以下の属性で「青隣」が好走しました。該当する青塗本命馬の評価を下げます: {', '.join(downgraded_attrs)}")
 
                 future_races = current_df[current_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
-                    
-                    # 1. 傾向加点（トレンドスコア）の計算
                     def calc_bonus(row):
                         row_pat = row.get('パターン', '')
                         if not row_pat or pd.isna(row_pat): return 0.0
@@ -516,7 +525,7 @@ if uploaded_file:
                         for p in pats:
                             if p in hit_patterns and len(p) == 1: 
                                 bonus += 2.0 
-                        if 'Blue' in pats:
+                        if '青' in pats:
                             my_attrs = str(row.get('属性', ''))
                             for bad_attr in downgraded_attrs:
                                 if bad_attr in my_attrs:
@@ -525,14 +534,9 @@ if uploaded_file:
                         return bonus
 
                     future_races['傾向加点'] = future_races.apply(calc_bonus, axis=1)
-                    
-                    # 2. 総合スコアの計算 (基本スコア + トレンド加点)
                     future_races['総合スコア'] = future_races['スコア'] + future_races['傾向加点']
-                    
-                    # 3. レース内順位の計算 (総合スコアに基づく順位)
                     future_races['レース内順位'] = future_races.groupby(['場名', 'R'])['総合スコア'].rank(method='min', ascending=False)
 
-                    # 4. 買い目推奨ロジック（順位を使用）
                     def get_bet_recommendation(row):
                         score = row['総合スコア']
                         rank_in_race = row['レース内順位']
@@ -540,7 +544,7 @@ if uploaded_file:
                         my_pats = pat_str.split(',')
                         matched = [p for p in my_pats if p in hit_patterns]
                         is_trend_horse = len(matched) > 0
-                        is_blue = 'Blue' in my_pats
+                        is_blue = '青' in my_pats
 
                         if score >= 15: rank = "S"
                         elif score >= 12: rank = "A"
@@ -566,7 +570,6 @@ if uploaded_file:
 
                     future_races['推奨買い目'] = future_races.apply(get_bet_recommendation, axis=1)
                     
-                    # 5. 表示処理
                     future_places = sorted(future_races['場名'].unique())
                     if future_places:
                         f_tabs = st.tabs(future_places)
@@ -584,7 +587,7 @@ if uploaded_file:
                                             target_df = target_df.sort_values('総合スコア', ascending=False)
                                             
                                             target_df['馬名'] = target_df.apply(
-                                                lambda x: f":blue[**{x['馬名']}**]" if 'Blue' in str(x['パターン']) else x['馬名'], 
+                                                lambda x: f":blue[**{x['馬名']}**]" if '青' in str(x['パターン']) else x['馬名'], 
                                                 axis=1
                                             )
                                             
@@ -596,15 +599,34 @@ if uploaded_file:
                                                 h2_score = h2['総合スコア']
                                                 h1_name = str(h1['馬名']).replace(':blue[**', '').replace('**]', '')
                                                 
-                                                if h1_score >= 15 and h2_score >= 12:
-                                                    st.success(f"🔥 **{r_num}R 勝負レース**: {h1['正番']} - {h2['正番']} (ワイド・馬連)")
-                                                elif h1_score >= 15:
+                                                # オッズ取得 (安全に)
+                                                h1_odds = h1.get('単ｵｯｽﾞ', np.nan)
+                                                odds_str = f"(単{h1_odds}倍)" if pd.notna(h1_odds) else "(オッズ不明)"
+                                                
+                                                # ★修正: オッズ判定ロジック
+                                                # Sランク(15点以上) かつ 順位1位
+                                                if h1_score >= 15:
+                                                    if pd.notna(h1_odds):
+                                                        if h1_odds >= 3.0:
+                                                            st.success(f"🔥 **{r_num}R 激アツ勝負 (高期待値)**: {h1['正番']} ({h1_name}) {odds_str}")
+                                                        elif h1_odds < 1.5:
+                                                            st.warning(f"🧱 **{r_num}R 鉄板 (堅実)**: {h1['正番']} ({h1_name}) {odds_str}")
+                                                        else:
+                                                            st.info(f"👑 **{r_num}R 盤石の軸**: {h1['正番']} ({h1_name}) {odds_str}")
+                                                    else:
+                                                        st.info(f"👑 **{r_num}R 盤石の軸**: {h1['正番']} ({h1_name})")
+                                                elif h1_score >= 12:
                                                     st.info(f"💡 **{r_num}R 単複推奨**: {h1['正番']} ({h1_name})")
                                                 else:
                                                     st.caption(f"🎲 {r_num}R は混戦模様です。")
                                             
+                                            # オッズ列も表示
+                                            disp_cols = ['R', '馬名', '単ｵｯｽﾞ', 'タイプ', 'パターン', 'スコア', '傾向加点', '総合スコア', '推奨買い目']
+                                            # カラムがあるか確認してから表示
+                                            final_disp_cols = [c for c in disp_cols if c in target_df.columns]
+                                            
                                             st.dataframe(
-                                                target_df[['R', '馬名', 'タイプ', 'パターン', 'スコア', '傾向加点', '総合スコア', '推奨買い目']],
+                                                target_df[final_disp_cols],
                                                 use_container_width=True,
                                                 hide_index=True
                                             )
