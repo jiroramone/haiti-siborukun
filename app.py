@@ -177,7 +177,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗 (Global)
+    # A. 青塗
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
@@ -506,9 +506,8 @@ if uploaded_file:
                 future_races = current_df[current_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
-                    # ★修正: レースごとのスコア順位を計算
-                    future_races['レース内順位'] = future_races.groupby(['場名', 'R'])['総合スコア'].rank(method='min', ascending=False)
-
+                    
+                    # 1. 傾向加点（トレンドスコア）の計算
                     def calc_bonus(row):
                         row_pat = row.get('パターン', '')
                         if not row_pat or pd.isna(row_pat): return 0.0
@@ -525,7 +524,15 @@ if uploaded_file:
                                     break
                         return bonus
 
-                    # ★修正: 買い目ロジック（順位判定を追加）
+                    future_races['傾向加点'] = future_races.apply(calc_bonus, axis=1)
+                    
+                    # 2. 総合スコアの計算 (基本スコア + トレンド加点)
+                    future_races['総合スコア'] = future_races['スコア'] + future_races['傾向加点']
+                    
+                    # 3. レース内順位の計算 (総合スコアに基づく順位)
+                    future_races['レース内順位'] = future_races.groupby(['場名', 'R'])['総合スコア'].rank(method='min', ascending=False)
+
+                    # 4. 買い目推奨ロジック（順位を使用）
                     def get_bet_recommendation(row):
                         score = row['総合スコア']
                         rank_in_race = row['レース内順位']
@@ -535,14 +542,12 @@ if uploaded_file:
                         is_trend_horse = len(matched) > 0
                         is_blue = 'Blue' in my_pats
 
-                        # スコア基準を厳格化
                         if score >= 15: rank = "S"
                         elif score >= 12: rank = "A"
                         elif score >= 10: rank = "B"
                         elif is_blue: rank = "C"
                         else: rank = "D"
 
-                        # 順位によるフィルタ（2位以下ならランクダウン）
                         if rank_in_race > 1:
                             if rank == "S": rank = "A"
                             elif rank == "A": rank = "B"
@@ -559,13 +564,9 @@ if uploaded_file:
                             if is_trend_horse: return "注 傾向合致"
                             return "△ 紐"
 
-                    future_races['傾向加点'] = future_races.apply(calc_bonus, axis=1)
-                    future_races['総合スコア'] = future_races['スコア'] + future_races['傾向加点']
-                    
-                    # 再度ランク計算（加点後）
-                    future_races['レース内順位'] = future_races.groupby(['場名', 'R'])['総合スコア'].rank(method='min', ascending=False)
                     future_races['推奨買い目'] = future_races.apply(get_bet_recommendation, axis=1)
                     
+                    # 5. 表示処理
                     future_places = sorted(future_races['場名'].unique())
                     if future_places:
                         f_tabs = st.tabs(future_places)
@@ -595,7 +596,6 @@ if uploaded_file:
                                                 h2_score = h2['総合スコア']
                                                 h1_name = str(h1['馬名']).replace(':blue[**', '').replace('**]', '')
                                                 
-                                                # 厳格化した基準での表示
                                                 if h1_score >= 15 and h2_score >= 12:
                                                     st.success(f"🔥 **{r_num}R 勝負レース**: {h1['正番']} - {h2['正番']} (ワイド・馬連)")
                                                 elif h1_score >= 15:
