@@ -177,27 +177,21 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗 (Global - 厩舎/馬主は全場一括, 騎手はLocal)
+    # A. 青塗
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
-        
-        if col == '騎手':
-            group_keys = ['場名', col]
-        else:
-            group_keys = [col]
-        
+        if col == '騎手': group_keys = ['場名', col]
+        else: group_keys = [col]
         try:
             for name_key, group in df_curr.groupby(group_keys):
                 if len(group) < 2: continue
                 target_name = name_key[1] if col == '騎手' else name_key
                 if not target_name: continue
-                
                 common_vals = get_common_values(group)
                 if common_vals:
                     all_races_display = [f"{r['場名']}{r['R']}" for _, r in group.iterrows()]
                     priority = 0.3 if col == '騎手' else (0.2 if col == '厩舎' else 0.1)
-                    
                     for _, row in group.iterrows():
                         current_race_str = f"{row['場名']}{row['R']}"
                         other_races = [s for s in all_races_display if s != current_race_str]
@@ -211,30 +205,45 @@ def analyze_logic(df_curr, df_prev=None):
                             '条件': remark,
                             'スコア': 9.0 + priority
                         })
-                        blue_keys.add((row['場名'], row['R'], row['馬名']))
+                        blue_keys.add((row['場名'], row['R'], row['馬名'], row['属性']))
         except: continue
 
     # B. 青塗の隣
     if blue_keys:
+        blue_lookup = {}
+        for b in blue_keys:
+            key = (b[0], b[1]) 
+            if key not in blue_lookup: blue_lookup[key] = []
+            blue_lookup[key].append({'馬名': b[2], '属性': b[3]})
+
         for (place, race), group in df_curr.groupby(['場名', 'R']):
+            key = (place, race)
+            if key not in blue_lookup: continue
+            blue_horses_info = blue_lookup[key]
             group = group.sort_values('正番')
             umaban_map = {int(row['正番']): row for _, row in group.iterrows()}
-            blue_horses = [row for _, row in group.iterrows() if (place, race, row['馬名']) in blue_keys]
-            for b_row in blue_horses:
+            blue_horse_names = [b['馬名'] for b in blue_horses_info]
+
+            for b_info in blue_horses_info:
+                b_row = group[group['馬名'] == b_info['馬名']]
+                if b_row.empty: continue
+                b_row = b_row.iloc[0]
                 curr_num = int(b_row['正番'])
+                source_attr = b_info['属性']
                 for t_num in [curr_num - 1, curr_num + 1]:
                     if t_num in umaban_map:
                         t_row = umaban_map[t_num]
-                        if (place, race, t_row['馬名']) not in blue_keys:
+                        if t_row['馬名'] not in blue_horse_names:
                             rec_list.append({
                                 '場名': place, 'R': race, '正番': t_num, '馬名': t_row['馬名'],
-                                '属性': '(青塗隣)', 'タイプ': '△ 青塗の隣',
+                                '属性': f"(青塗隣) <{source_attr}>", 
+                                'タイプ': '△ 青塗の隣',
                                 'パターン': 'BlueNeighbor',
-                                '条件': f"青塗馬(#{curr_num})の隣",
+                                '条件': f"青塗#{curr_num}({source_attr})の隣",
                                 'スコア': 9.0
                             })
 
-    # C. 通常ペア (騎手) - Local
+    # C. 通常ペア (騎手)
     if '騎手' in df_curr.columns:
         for (place, name), group in df_curr.groupby(['場名', '騎手']):
             if len(group) < 2: continue
@@ -256,7 +265,7 @@ def analyze_logic(df_curr, df_prev=None):
                         '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 0.3
                     })
 
-    # C. 通常ペア (厩舎・馬主) - Global Sequence
+    # C. 通常ペア (厩舎・馬主)
     for col in ['厩舎', '馬主']:
         if col not in df_curr.columns: continue
         for name, group in df_curr.groupby(col):
@@ -282,7 +291,7 @@ def analyze_logic(df_curr, df_prev=None):
                         '条件': cond_next, 'スコア': base_score + bonus
                     })
 
-    # D. 前日同配置 (騎手のみ)
+    # D. 前日同配置
     if df_prev is not None and not df_prev.empty:
         for idx, row in df_curr.iterrows():
             race = row['R']
@@ -470,7 +479,6 @@ if uploaded_file:
                             
                             with col_g2:
                                 st.write(f"**{place} の結果一覧**")
-                                # ★修正: 結果一覧でも青塗馬の名前を青くする
                                 place_hits_disp = place_hits.copy()
                                 place_hits_disp['馬名'] = place_hits_disp.apply(
                                     lambda x: f":blue[**{x['馬名']}**]" if 'Blue' in str(x['パターン']) else x['馬名'], 
@@ -481,84 +489,122 @@ if uploaded_file:
                 # --- 傾向スコア加算 & 次レース表示 & 買い目 ---
                 st.markdown("### 📈 次レースの注目馬・推奨買い目")
                 
-                hit_patterns = set()
-                if not df_fuku.empty:
-                    for p in df_fuku['パターン']:
-                        if p: hit_patterns.update(str(p).split(','))
+                # 危険な属性抽出
+                downgraded_attrs = set()
+                hit_patterns = set() # トレンド
                 
-                neighbor_is_hot = 'BlueNeighbor' in hit_patterns
-                if neighbor_is_hot:
-                    st.warning("⚠️ 本日「青塗の隣」が好走しています。「青塗本命」の評価を下げて計算します。")
+                if not df_fuku.empty:
+                    for _, row in df_fuku.iterrows():
+                        pats = str(row['パターン']).split(',')
+                        hit_patterns.update(pats)
+                        
+                        if 'BlueNeighbor' in str(row['パターン']):
+                            found = re.findall(r'<(.*?)>', str(row['属性']))
+                            downgraded_attrs.update(found)
+                
+                if downgraded_attrs:
+                    st.warning(f"⚠️ 以下の属性で「青塗の隣」が好走しました。該当する青塗本命馬の評価を下げます: {', '.join(downgraded_attrs)}")
 
                 future_races = current_df[current_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
-                    def calc_bonus(row_pat):
+                    def calc_bonus(row):
+                        row_pat = row.get('パターン', '')
                         if not row_pat or pd.isna(row_pat): return 0.0
                         pats = str(row_pat).split(',')
                         bonus = 0.0
+                        
+                        # トレンド加点
                         for p in pats:
                             if p in hit_patterns and len(p) == 1: 
                                 bonus += 2.0 
                         
-                        if 'Blue' in pats and neighbor_is_hot:
-                            bonus -= 3.0
+                        # 青塗ペナルティ
+                        if 'Blue' in pats:
+                            my_attrs = str(row.get('属性', ''))
+                            for bad_attr in downgraded_attrs:
+                                if bad_attr in my_attrs:
+                                    bonus -= 3.0
+                                    break
                         return bonus
 
                     def get_bet_recommendation(row):
                         score = row['総合スコア']
-                        pat = str(row['パターン'])
-                        if score >= 12: return "◎ 単複/軸"
-                        if score >= 9: return "○ ワイド/相手"
-                        if "Blue" in pat: return "▲ 穴(青)"
-                        return "△ 紐"
+                        pat_str = str(row.get('パターン', ''))
+                        my_pats = pat_str.split(',')
+                        matched = [p for p in my_pats if p in hit_patterns]
+                        is_trend_horse = len(matched) > 0
+                        is_blue = 'Blue' in my_pats
 
-                    future_races['傾向加点'] = future_races['パターン'].apply(calc_bonus)
+                        if score >= 13: rank = "S"
+                        elif score >= 11: rank = "A"
+                        elif score >= 9: rank = "B"
+                        elif is_blue: rank = "C"
+                        else: rank = "D"
+
+                        if rank == "S":
+                            return "🚀 鉄板級" if is_trend_horse else "◎ 不動軸"
+                        elif rank == "A":
+                            return "✨ 傾向軸" if is_trend_horse else "◎ 軸候補"
+                        elif rank == "B":
+                            return "🔥 激熱相手" if is_trend_horse else "○ 相手筆頭"
+                        elif rank == "C":
+                            return "★ 傾向合致穴" if is_trend_horse else "▲ 青塗穴"
+                        else: 
+                            if is_trend_horse: return "注 傾向合致"
+                            return "△ 紐"
+
+                    future_races['傾向加点'] = future_races.apply(calc_bonus, axis=1)
                     future_races['総合スコア'] = future_races['スコア'] + future_races['傾向加点']
                     future_races['推奨買い目'] = future_races.apply(get_bet_recommendation, axis=1)
                     
                     future_places = sorted(future_races['場名'].unique())
                     if future_places:
+                        # 開催場タブ
                         f_tabs = st.tabs(future_places)
                         
                         for tab, place in zip(f_tabs, future_places):
                             with tab:
                                 place_future = future_races[future_races['場名'] == place]
                                 if not place_future.empty:
-                                    next_r = place_future['R'].min()
-                                    target_df = place_future[place_future['R'] == next_r]
-                                    target_df = target_df.sort_values('総合スコア', ascending=False)
                                     
-                                    # ★修正: 推奨リストでも青塗馬の名前を青くする
-                                    target_df['馬名'] = target_df.apply(
-                                        lambda x: f":blue[**{x['馬名']}**]" if 'Blue' in str(x['パターン']) else x['馬名'], 
-                                        axis=1
-                                    )
+                                    # ★修正: レース番号ごとのタブを作成 (全レース閲覧可)
+                                    future_r_list = sorted(place_future['R'].unique())
+                                    r_tabs = st.tabs([f"{r}R" for r in future_r_list])
                                     
-                                    st.markdown(f"**{place} {next_r}R の推奨馬**")
-                                    
-                                    top_horses = target_df.head(3)
-                                    if len(top_horses) >= 2:
-                                        h1 = top_horses.iloc[0]
-                                        h2 = top_horses.iloc[1]
-                                        h1_score = h1['総合スコア']
-                                        h2_score = h2['総合スコア']
-                                        
-                                        # 表示用に馬名から装飾を除去して取得
-                                        h1_name = h1['馬名'].replace(':blue[**', '').replace('**]', '')
-                                        
-                                        if h1_score >= 12 and h2_score >= 9:
-                                            st.success(f"🔥 **勝負レース候補**: {h1['正番']} - {h2['正番']} (ワイド・馬連一点)")
-                                        elif h1_score >= 12:
-                                            st.info(f"💡 **単複推奨**: {h1['正番']} ({h1_name})")
-                                        else:
-                                            st.info(f"🎲 **混戦模様**: 上位BOX推奨")
-                                    
-                                    st.dataframe(
-                                        target_df[['R', '馬名', 'タイプ', 'パターン', 'スコア', '傾向加点', '総合スコア', '推奨買い目']],
-                                        use_container_width=True,
-                                        hide_index=True
-                                    )
+                                    for r_tab, r_num in zip(r_tabs, future_r_list):
+                                        with r_tab:
+                                            target_df = place_future[place_future['R'] == r_num]
+                                            target_df = target_df.sort_values('総合スコア', ascending=False)
+                                            
+                                            # 馬名装飾
+                                            target_df['馬名'] = target_df.apply(
+                                                lambda x: f":blue[**{x['馬名']}**]" if 'Blue' in str(x['パターン']) else x['馬名'], 
+                                                axis=1
+                                            )
+                                            
+                                            # 買い目提案エリア
+                                            top_horses = target_df.head(3)
+                                            if len(top_horses) >= 2:
+                                                h1 = top_horses.iloc[0]
+                                                h2 = top_horses.iloc[1]
+                                                h1_score = h1['総合スコア']
+                                                h2_score = h2['総合スコア']
+                                                h1_name = str(h1['馬名']).replace(':blue[**', '').replace('**]', '')
+                                                
+                                                # メッセージ作成
+                                                if h1_score >= 12 and h2_score >= 9:
+                                                    st.success(f"🔥 **{r_num}R 勝負レース**: {h1['正番']} - {h2['正番']} (ワイド・馬連)")
+                                                elif h1_score >= 12:
+                                                    st.info(f"💡 **{r_num}R 単複推奨**: {h1['正番']} ({h1_name})")
+                                                else:
+                                                    st.caption(f"🎲 {r_num}R は混戦模様です。")
+                                            
+                                            st.dataframe(
+                                                target_df[['R', '馬名', 'タイプ', 'パターン', 'スコア', '傾向加点', '総合スコア', '推奨買い目']],
+                                                use_container_width=True,
+                                                hide_index=True
+                                            )
                                 else:
                                     st.info("残りレースはありません")
                     else:
