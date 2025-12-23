@@ -177,7 +177,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗
+    # A. 青塗 (Global)
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
@@ -233,21 +233,37 @@ def analyze_logic(df_curr, df_prev=None):
                 b_row = group[group['馬名'] == b_info['馬名']]
                 if b_row.empty: continue
                 b_row = b_row.iloc[0]
+                
                 curr_num = int(b_row['正番'])
                 source_attr = b_info['属性']
+                
+                # ★修正: 青塗本体のオッズを取得
+                blue_odds = pd.to_numeric(b_row.get('単ｵｯｽﾞ'), errors='coerce')
+                
                 for t_num in [curr_num - 1, curr_num + 1]:
                     if t_num in umaban_map:
                         t_row = umaban_map[t_num]
                         if t_row['馬名'] not in blue_horse_names:
-                            odds_val = t_row.get('単ｵｯｽﾞ', np.nan)
+                            # 隣の馬のオッズを取得
+                            neighbor_odds = pd.to_numeric(t_row.get('単ｵｯｽﾞ'), errors='coerce')
+                            
+                            # 基本スコア
+                            neighbor_score = 9.0
+                            
+                            # ★修正: 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
+                            # 例: 隣が5倍、本体が20倍なら、隣に+2.0点して11.0点にする
+                            if pd.notna(blue_odds) and pd.notna(neighbor_odds):
+                                if neighbor_odds < blue_odds:
+                                    neighbor_score += 2.0
+                            
                             rec_list.append({
                                 '場名': place, 'R': race, '正番': t_num, '馬名': t_row['馬名'],
-                                '単ｵｯｽﾞ': odds_val,
+                                '単ｵｯｽﾞ': neighbor_odds,
                                 '属性': f"(青塗隣) <{source_attr}>", 
                                 'タイプ': '△ 青塗の隣',
                                 'パターン': '青隣',
                                 '条件': f"青塗#{curr_num}({source_attr})の隣",
-                                'スコア': 9.0
+                                'スコア': neighbor_score
                             })
 
     # C. 通常ペア (騎手)
@@ -539,7 +555,6 @@ if uploaded_file:
                                     break
                         
                         # 3. 高オッズによる減点（全パターン共通）
-                        # ★修正: 青塗に限らず、ペア・前日など全てにおいて50倍以上は減点
                         odds = row.get('単ｵｯｽﾞ', np.nan)
                         if pd.notna(odds) and odds > 49.9:
                             bonus -= 5.0
