@@ -193,7 +193,6 @@ def analyze_logic(df_curr, df_prev=None):
                 if common_vals:
                     all_races_display = [f"{r['場名']}{r['R']}" for _, r in group.iterrows()]
                     
-                    # ★修正: 騎手はメイン(+1.0), 厩舎・馬主はサポート(+0.2)
                     priority = 1.0 if col == '騎手' else 0.2
                     
                     for _, row in group.iterrows():
@@ -201,7 +200,6 @@ def analyze_logic(df_curr, df_prev=None):
                         other_races = [s for s in all_races_display if s != current_race_str]
                         other_races = sorted(list(set(other_races)))
                         remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}]'
-                        # オッズも保持
                         odds_val = row.get('単ｵｯｽﾞ', np.nan)
                         rec_list.append({
                             '場名': row['場名'], 'R': row['R'], '正番': row['正番'], '馬名': row['馬名'],
@@ -252,7 +250,7 @@ def analyze_logic(df_curr, df_prev=None):
                                 'スコア': 9.0
                             })
 
-    # C. 通常ペア (騎手) - メイン要素
+    # C. 通常ペア (騎手)
     if '騎手' in df_curr.columns:
         for (place, name), group in df_curr.groupby(['場名', '騎手']):
             if len(group) < 2: continue
@@ -263,7 +261,6 @@ def analyze_logic(df_curr, df_prev=None):
                 if pat:
                     label = "◎ チャンス" if any(x in pat for x in ['C','D','G','H']) else "○ 狙い目"
                     base_score = 4.0 if label.startswith("◎") else 3.0
-                    # ★修正: 騎手ペアは +1.0点 (強力)
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
                         '単ｵｯｽﾞ': curr.get('単ｵｯｽﾞ', np.nan),
@@ -277,7 +274,7 @@ def analyze_logic(df_curr, df_prev=None):
                         '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 1.0
                     })
 
-    # C. 通常ペア (厩舎・馬主) - サポート要素
+    # C. 通常ペア (厩舎・馬主)
     for col in ['厩舎', '馬主']:
         if col not in df_curr.columns: continue
         for name, group in df_curr.groupby(col):
@@ -291,8 +288,6 @@ def analyze_logic(df_curr, df_prev=None):
                     base_score = 4.0 if label.startswith("◎") else 3.0
                     cond_curr = f"[{col}] ペア({next_r['場名']}{next_r['R']}R #{next_r['正番']})"
                     cond_next = f"[{col}] ペア({curr['場名']}{curr['R']}R #{curr['正番']})"
-                    
-                    # ★修正: 厩舎・馬主ペアは +0.2点 (補助)
                     bonus = 0.2
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
@@ -529,15 +524,26 @@ if uploaded_file:
                         if not row_pat or pd.isna(row_pat): return 0.0
                         pats = str(row_pat).split(',')
                         bonus = 0.0
+                        
+                        # 1. ヒットパターン加点
                         for p in pats:
                             if p in hit_patterns and len(p) == 1: 
                                 bonus += 2.0 
+                        
+                        # 2. 青塗処理
                         if '青' in pats:
+                            # 隣ヒットによる減点
                             my_attrs = str(row.get('属性', ''))
                             for bad_attr in downgraded_attrs:
                                 if bad_attr in my_attrs:
                                     bonus -= 3.0
                                     break
+                            
+                            # ★修正: オッズによる減点 (49.9倍以下ならペナルティ)
+                            odds = row.get('単ｵｯｽﾞ', np.nan)
+                            if pd.notna(odds) and odds <= 49.9:
+                                bonus -= 3.0
+                                
                         return bonus
 
                     future_races['傾向加点'] = future_races.apply(calc_bonus, axis=1)
