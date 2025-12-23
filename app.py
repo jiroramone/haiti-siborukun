@@ -177,7 +177,7 @@ def analyze_logic(df_curr, df_prev=None):
     
     rec_list = []
     
-    # A. 青塗 (Global)
+    # A. 青塗
     blue_keys = set()
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
@@ -282,7 +282,7 @@ def analyze_logic(df_curr, df_prev=None):
                     bonus = 0.2
                     rec_list.append({
                         '場名': curr['場名'], 'R': curr['R'], '正番': curr['正番'], '馬名': curr['馬名'],
-                        '属性': f""{col}:{name}", 'タイプ': label, 'パターン': pat, 
+                        '属性': f"{col}:{name}", 'タイプ': label, 'パターン': pat, 
                         '条件': cond_curr, 'スコア': base_score + bonus
                     })
                     rec_list.append({
@@ -389,35 +389,29 @@ if uploaded_file:
         if not st.session_state['analyzed_df'].empty:
             
             st.subheader("📝 結果入力 & 推奨馬リスト")
-            st.info("開催場 > レース番号 の順にタブを切り替えて結果を入力してください。")
+            st.info("開催場ごとのタブを切り替えて入力し、最後に「更新ボタン」を押してください。")
             
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
             display_cols = ['場名', 'R', '正番', '馬名', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             with st.form("result_entry_form"):
-                
-                # ★修正: 開催場タブ
-                place_tabs = st.tabs(places)
+                tabs = st.tabs(places)
                 edited_dfs = [] 
                 
-                for p_tab, place in zip(place_tabs, places):
-                    with p_tab:
-                        # その場のデータを抽出
-                        place_df = full_df[full_df['場名'] == place]
+                for tab, place in zip(tabs, places):
+                    with tab:
+                        valid_cols = [c for c in display_cols if c in full_df.columns]
+                        place_df = full_df[full_df['場名'] == place][valid_cols]
                         
-                        # ★修正: レース番号でタブ分け
                         race_list = sorted(place_df['R'].unique())
                         if race_list:
-                            # 1R, 2R... のタブを作成
                             r_tabs = st.tabs([f"{r}R" for r in race_list])
                             
                             for r_tab, r_num in zip(r_tabs, race_list):
                                 with r_tab:
-                                    # そのレースのデータを抽出
-                                    race_data = place_df[place_df['R'] == r_num][valid_cols := [c for c in display_cols if c in full_df.columns]]
+                                    race_data = place_df[place_df['R'] == r_num]
                                     
-                                    # データエディタ
                                     edited_chunk = st.data_editor(
                                         race_data,
                                         column_config={
@@ -431,13 +425,13 @@ if uploaded_file:
                                         disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
                                         hide_index=True,
                                         use_container_width=True,
-                                        height=300, # 高さを調整
-                                        key=f"editor_{place}_{r_num}" # キーをレース単位でユニークにする
+                                        height=300,
+                                        key=f"editor_{place}_{r_num}"
                                     )
                                     edited_dfs.append(edited_chunk)
                 
                 st.markdown("---")
-                submit_btn = st.form_submit_button("🔄 全レースの入力を確定して更新")
+                submit_btn = st.form_submit_button("🔄 全タブの入力を確定して更新")
 
             if submit_btn:
                 if edited_dfs:
