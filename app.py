@@ -4,7 +4,7 @@ import numpy as np
 import re
 import plotly.express as px
 import openpyxl
-import requests  # ★追加: Webアクセス用
+import requests
 
 # ページ設定
 st.set_page_config(page_title="配置馬券術 Web", layout="wide")
@@ -99,37 +99,36 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: Webからオッズを取得する関数 (requestsを使用)
 def fetch_odds_from_web(url):
     """
     指定されたURLからテーブルを読み込み、馬番と単勝オッズのペアを返す
-    netkeiba等を想定。User-Agentを設定してアクセス拒否を回避。
     """
     try:
-        # ブラウザのふりをするヘッダー
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         
-        # requestsでHTMLを取得
         response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status() # エラーなら例外発生
-        
-        # 文字コードの自動調整 (netkeibaはEUC-JPが多いが自動判定させる)
+        response.raise_for_status()
         response.encoding = response.apparent_encoding
 
-        # HTMLからテーブルを抽出
-        dfs = pd.read_html(response.text)
+        # ★修正: lxmlを明示的に使用
+        try:
+            dfs = pd.read_html(response.text, flavor='lxml')
+        except ImportError:
+            st.error("⚠️ エラー: 'lxml' ライブラリが見つかりません。requirements.txt に 'lxml' を追加してください。")
+            return None
+        except Exception:
+            # lxmlで失敗した場合のバックアップ
+            try:
+                dfs = pd.read_html(response.text)
+            except Exception as e:
+                st.error(f"HTML解析エラー: {e}")
+                return None
         
         target_df = None
-        
-        # オッズらしきテーブルを探す
         for df in dfs:
-            # カラム名に「馬番」と「単勝」が含まれているかチェック
             cols = [str(c).replace(' ', '').replace('\n', '') for c in df.columns]
-            
-            # netkeiba等のテーブル構造に対応
-            # マルチインデックスの場合もあるのでフラットにする
             if isinstance(df.columns, pd.MultiIndex):
                 flat_cols = []
                 for c in df.columns:
@@ -138,11 +137,10 @@ def fetch_odds_from_web(url):
                 df.columns = cols
 
             if any('馬番' in c for c in cols) and any('単勝' in c for c in cols):
-                # カラム名を特定してリネーム
                 col_map = {}
                 for c, original_c in zip(cols, df.columns):
                     if '馬番' in c: col_map[original_c] = '正番'
-                    elif '単勝' in c and 'オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ' # netkeibaなど
+                    elif '単勝' in c and 'オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
                     elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
                 
                 if '正番' in col_map.values() and '単ｵｯｽﾞ' in col_map.values():
@@ -150,27 +148,20 @@ def fetch_odds_from_web(url):
                     break
         
         if target_df is not None:
-            # 必要な列だけ抽出して数値化
             res = target_df[['正番', '単ｵｯｽﾞ']].copy()
-            
-            # 文字列型の数字などをクリーニング
             res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
             
-            # オッズに「取消」などの文字が入っている場合の対応
             def clean_odds(x):
-                try:
-                    return float(x)
-                except:
-                    return np.nan
+                try: return float(x)
+                except: return np.nan
             
             res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
-            
             res = res.dropna(subset=['正番'])
             return res
         else:
             return None
     except Exception as e:
-        st.error(f"取得エラー詳細: {e}") # デバッグ用
+        st.error(f"取得エラー詳細: {e}")
         return None
 
 # ==========================================
@@ -302,7 +293,6 @@ def analyze_logic(df_curr, df_prev=None):
                             neighbor_odds = pd.to_numeric(t_row.get('単ｵｯｽﾞ'), errors='coerce')
                             neighbor_score = 9.0
                             
-                            # 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
                             if pd.notna(blue_odds) and pd.notna(neighbor_odds):
                                 if neighbor_odds < blue_odds:
                                     neighbor_score += 2.0
@@ -592,9 +582,7 @@ if uploaded_file:
                                                     
                                                     st.success(f"{place}{r_num}R のオッズを更新しました！")
                                                     st.rerun()
-                                                else:
-                                                    st.error("オッズの取得に失敗しました。URLを確認してください。")
-
+                                                
                                     race_data = place_df[place_df['R'] == r_num][valid_cols := [c for c in display_cols if c in full_df.columns]]
                                     edited_chunk = st.data_editor(
                                         race_data,
