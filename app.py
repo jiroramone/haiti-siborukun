@@ -99,6 +99,7 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
+# ★修正版: 強力なオッズ取得関数 (デバッグ機能付き)
 def fetch_odds_from_web(url):
     """
     指定されたURLからテーブルを読み込み、馬番と単勝オッズのペアを返す
@@ -112,41 +113,60 @@ def fetch_odds_from_web(url):
         response.raise_for_status()
         response.encoding = response.apparent_encoding
 
-        # エラー回避のため、複数のパーサーを順に試す
+        # HTML解析 (依存関係エラー回避)
         try:
-            # まず標準的なbs4を試す
             dfs = pd.read_html(response.text, flavor='bs4')
         except ImportError:
             try:
-                # bs4がない、または失敗したらhtml5lib
                 dfs = pd.read_html(response.text, flavor='html5lib')
             except ImportError:
-                try:
-                    # それもダメならlxml
-                    dfs = pd.read_html(response.text, flavor='lxml')
-                except ImportError:
-                    # 最後は指定なし（pandasにお任せ）
-                    dfs = pd.read_html(response.text)
+                dfs = pd.read_html(response.text)
         
+        if not dfs:
+            st.warning("ページ内にテーブルが見つかりませんでした。")
+            return None
+
         target_df = None
-        for df in dfs:
+        
+        # デバッグ: 見つかったテーブル情報を表示（開発用）
+        # st.caption(f"ページ内で {len(dfs)} 個のテーブルが見つかりました。解析中...")
+
+        for i, df in enumerate(dfs):
+            # カラム名のクリーニング
             cols = [str(c).replace(' ', '').replace('\n', '') for c in df.columns]
+            
+            # マルチインデックス対応
             if isinstance(df.columns, pd.MultiIndex):
                 flat_cols = []
                 for c in df.columns:
+                    # Unnamedを除く結合
                     flat_cols.append(''.join([str(x) for x in c if 'Unnamed' not in str(x)]))
                 cols = flat_cols
                 df.columns = cols
 
-            if any('馬番' in c for c in cols) and any('単勝' in c for c in cols):
+            # --- 判定ロジックの緩和 ---
+            # 「馬番」が含まれているか？
+            has_umaban = any('馬番' in c for c in cols)
+            
+            # 「単勝」または「オッズ」または「人気」が含まれているか？
+            # (結果ページだと「単勝」列があるが、出馬表だと「単勝オッズ」だったりする)
+            has_odds = any(('単勝' in c) or ('オッズ' in c) for c in cols)
+
+            if has_umaban and has_odds:
                 col_map = {}
                 for c, original_c in zip(cols, df.columns):
-                    if '馬番' in c: col_map[original_c] = '正番'
-                    elif '単勝' in c and 'オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
-                    elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
+                    if '馬番' in c: 
+                        col_map[original_c] = '正番'
+                    # オッズ列の特定（優先順位: 単勝オッズ > 単勝 > オッズ）
+                    elif '単勝' in c: 
+                        col_map[original_c] = '単ｵｯｽﾞ'
+                    elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values():
+                        col_map[original_c] = '単ｵｯｽﾞ'
                 
+                # 必須列が揃っているか確認
                 if '正番' in col_map.values() and '単ｵｯｽﾞ' in col_map.values():
                     target_df = df.rename(columns=col_map)
+                    # st.success(f"テーブル#{i+1} をオッズ表として認識しました。")
                     break
         
         if target_df is not None:
@@ -154,16 +174,27 @@ def fetch_odds_from_web(url):
             res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
             
             def clean_odds(x):
-                try: return float(x)
-                except: return np.nan
+                try: 
+                    # "---" や "取消" などを除外
+                    return float(x)
+                except: 
+                    return np.nan
             
             res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
             res = res.dropna(subset=['正番'])
             return res
         else:
+            # 失敗した場合、どんなカラムがあったかヒントを表示
+            st.warning("⚠️ オッズ表を特定できませんでした。以下の原因が考えられます。")
+            st.write("1. URLが「レース一覧」や「ニュース」のページになっている（レース詳細ページを使ってください）")
+            st.write("2. ページ内の表の列名が「馬番」「単勝」を含んでいない")
+            st.write("▼ 読み込んだページのテーブル列名一覧（デバッグ用）:")
+            for i, df in enumerate(dfs[:3]): # 最初の3つだけ表示
+                st.code(f"Table {i}: {list(df.columns)}")
             return None
+
     except Exception as e:
-        st.error(f"取得エラー詳細: {e}")
+        st.error(f"システムエラー: {e}")
         return None
 
 # ==========================================
