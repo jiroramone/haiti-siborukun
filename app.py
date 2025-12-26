@@ -99,38 +99,56 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: URL自動変換機能付きのオッズ取得関数
+# ★修正: 404エラー時の救済機能付きオッズ取得関数
 def fetch_odds_from_web(url):
     """
     指定されたURLからテーブルを読み込み、馬番と単勝オッズのペアを返す
     """
     try:
-        # ★追加: netkeibaの出馬表URL(shutuba.html)なら、オッズURL(odds.html)に自動変換
+        original_url = url
+        target_url = url
+        
+        # 出馬表URLならオッズURLへの変換を試みる（まずは最新情報を狙う）
         if "race.netkeiba.com" in url and "shutuba.html" in url:
-            url = url.replace("shutuba.html", "odds.html")
-            st.toast("💡 出馬表のURLを検知しました。より確実なオッズページからデータを取得します。", icon="🔄")
+            target_url = url.replace("shutuba.html", "odds.html")
+            st.toast("まずはオッズ専用ページを確認します...", icon="🔄")
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
         
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
+        response = None
+        
+        # 1. まず変換後のURL（odds.html）でトライ
+        try:
+            response = requests.get(target_url, headers=headers, timeout=10)
+            response.raise_for_status() # 404ならここで例外へ
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404 and target_url != original_url:
+                # 2. 404（ページなし）なら、過去レースと判断して元のURL（shutuba.html）に戻す
+                st.warning("オッズ専用ページが見つかりませんでした（過去レースの可能性があります）。元のURLから読み込みます。")
+                response = requests.get(original_url, headers=headers, timeout=10)
+                response.raise_for_status()
+            else:
+                raise e # その他のエラーはそのまま投げる
+
         response.encoding = response.apparent_encoding
 
-        # エラー回避のため、複数のパーサーを順に試す
+        # HTML解析
         try:
             dfs = pd.read_html(response.text, flavor='bs4')
         except ImportError:
             try:
                 dfs = pd.read_html(response.text, flavor='html5lib')
             except ImportError:
-                try:
-                    dfs = pd.read_html(response.text, flavor='lxml')
-                except ImportError:
-                    dfs = pd.read_html(response.text)
+                dfs = pd.read_html(response.text)
         
+        if not dfs:
+            st.warning("ページ内にテーブルが見つかりませんでした。")
+            return None
+
         target_df = None
+        
         for df in dfs:
             cols = [str(c).replace(' ', '').replace('\n', '') for c in df.columns]
             if isinstance(df.columns, pd.MultiIndex):
@@ -140,12 +158,21 @@ def fetch_odds_from_web(url):
                 cols = flat_cols
                 df.columns = cols
 
-            # 「馬番」と「単勝」が含まれるテーブルを探す
-            if any('馬番' in c for c in cols) and any(('単勝' in c) or ('オッズ' in c) for c in cols):
+            # --- 列名の判定 ---
+            has_umaban = any('馬番' in c for c in cols)
+            # 「単勝」「オッズ」「人気」「予想」のいずれかがあればOKとする
+            has_odds = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気', '予想'])
+
+            if has_umaban and has_odds:
                 col_map = {}
                 for c, original_c in zip(cols, df.columns):
-                    if '馬番' in c: col_map[original_c] = '正番'
+                    if '馬番' in c: 
+                        col_map[original_c] = '正番'
+                    
+                    # オッズ列の優先順位判定
+                    elif '単勝' in c and 'オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
                     elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
+                    elif '予想オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ' # 出馬表対応
                     elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_c] = '単ｵｯｽﾞ'
                 
                 if '正番' in col_map.values() and '単ｵｯｽﾞ' in col_map.values():
@@ -166,10 +193,11 @@ def fetch_odds_from_web(url):
             res = res.dropna(subset=['正番'])
             return res
         else:
-            st.error("オッズ表が見つかりませんでした。URLが『出馬表』や『オッズ』のページであることを確認してください。")
+            st.error("有効なオッズ情報が見つかりませんでした。")
             return None
+
     except Exception as e:
-        st.error(f"取得エラー詳細: {e}")
+        st.error(f"取得エラー: {e}")
         return None
 
 # ==========================================
