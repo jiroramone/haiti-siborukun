@@ -99,12 +99,17 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正版: 強力なオッズ取得関数 (デバッグ機能付き)
+# ★修正: URL自動変換機能付きのオッズ取得関数
 def fetch_odds_from_web(url):
     """
     指定されたURLからテーブルを読み込み、馬番と単勝オッズのペアを返す
     """
     try:
+        # ★追加: netkeibaの出馬表URL(shutuba.html)なら、オッズURL(odds.html)に自動変換
+        if "race.netkeiba.com" in url and "shutuba.html" in url:
+            url = url.replace("shutuba.html", "odds.html")
+            st.toast("💡 出馬表のURLを検知しました。より確実なオッズページからデータを取得します。", icon="🔄")
+
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -113,60 +118,38 @@ def fetch_odds_from_web(url):
         response.raise_for_status()
         response.encoding = response.apparent_encoding
 
-        # HTML解析 (依存関係エラー回避)
+        # エラー回避のため、複数のパーサーを順に試す
         try:
             dfs = pd.read_html(response.text, flavor='bs4')
         except ImportError:
             try:
                 dfs = pd.read_html(response.text, flavor='html5lib')
             except ImportError:
-                dfs = pd.read_html(response.text)
+                try:
+                    dfs = pd.read_html(response.text, flavor='lxml')
+                except ImportError:
+                    dfs = pd.read_html(response.text)
         
-        if not dfs:
-            st.warning("ページ内にテーブルが見つかりませんでした。")
-            return None
-
         target_df = None
-        
-        # デバッグ: 見つかったテーブル情報を表示（開発用）
-        # st.caption(f"ページ内で {len(dfs)} 個のテーブルが見つかりました。解析中...")
-
-        for i, df in enumerate(dfs):
-            # カラム名のクリーニング
+        for df in dfs:
             cols = [str(c).replace(' ', '').replace('\n', '') for c in df.columns]
-            
-            # マルチインデックス対応
             if isinstance(df.columns, pd.MultiIndex):
                 flat_cols = []
                 for c in df.columns:
-                    # Unnamedを除く結合
                     flat_cols.append(''.join([str(x) for x in c if 'Unnamed' not in str(x)]))
                 cols = flat_cols
                 df.columns = cols
 
-            # --- 判定ロジックの緩和 ---
-            # 「馬番」が含まれているか？
-            has_umaban = any('馬番' in c for c in cols)
-            
-            # 「単勝」または「オッズ」または「人気」が含まれているか？
-            # (結果ページだと「単勝」列があるが、出馬表だと「単勝オッズ」だったりする)
-            has_odds = any(('単勝' in c) or ('オッズ' in c) for c in cols)
-
-            if has_umaban and has_odds:
+            # 「馬番」と「単勝」が含まれるテーブルを探す
+            if any('馬番' in c for c in cols) and any(('単勝' in c) or ('オッズ' in c) for c in cols):
                 col_map = {}
                 for c, original_c in zip(cols, df.columns):
-                    if '馬番' in c: 
-                        col_map[original_c] = '正番'
-                    # オッズ列の特定（優先順位: 単勝オッズ > 単勝 > オッズ）
-                    elif '単勝' in c: 
-                        col_map[original_c] = '単ｵｯｽﾞ'
-                    elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values():
-                        col_map[original_c] = '単ｵｯｽﾞ'
+                    if '馬番' in c: col_map[original_c] = '正番'
+                    elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
+                    elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_c] = '単ｵｯｽﾞ'
                 
-                # 必須列が揃っているか確認
                 if '正番' in col_map.values() and '単ｵｯｽﾞ' in col_map.values():
                     target_df = df.rename(columns=col_map)
-                    # st.success(f"テーブル#{i+1} をオッズ表として認識しました。")
                     break
         
         if target_df is not None:
@@ -175,7 +158,6 @@ def fetch_odds_from_web(url):
             
             def clean_odds(x):
                 try: 
-                    # "---" や "取消" などを除外
                     return float(x)
                 except: 
                     return np.nan
@@ -184,17 +166,10 @@ def fetch_odds_from_web(url):
             res = res.dropna(subset=['正番'])
             return res
         else:
-            # 失敗した場合、どんなカラムがあったかヒントを表示
-            st.warning("⚠️ オッズ表を特定できませんでした。以下の原因が考えられます。")
-            st.write("1. URLが「レース一覧」や「ニュース」のページになっている（レース詳細ページを使ってください）")
-            st.write("2. ページ内の表の列名が「馬番」「単勝」を含んでいない")
-            st.write("▼ 読み込んだページのテーブル列名一覧（デバッグ用）:")
-            for i, df in enumerate(dfs[:3]): # 最初の3つだけ表示
-                st.code(f"Table {i}: {list(df.columns)}")
+            st.error("オッズ表が見つかりませんでした。URLが『出馬表』や『オッズ』のページであることを確認してください。")
             return None
-
     except Exception as e:
-        st.error(f"システムエラー: {e}")
+        st.error(f"取得エラー詳細: {e}")
         return None
 
 # ==========================================
@@ -599,7 +574,7 @@ if uploaded_file:
                                 with r_tab:
                                     # オッズ取得ボタン
                                     with st.expander(f"🌐 {place}{r_num}R の最新オッズをWebから取得 (netkeiba)"):
-                                        st.caption("netkeibaのレースページURLを貼り付けてください")
+                                        st.caption("netkeibaのレースページURLを貼り付けてください（出馬表のURLでもOKです）")
                                         url_input = st.text_input("URL", key=f"url_{place}_{r_num}")
                                         if st.form_submit_button(f"📥 {place}{r_num}R オッズ取得・更新"):
                                             if url_input:
