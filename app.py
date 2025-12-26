@@ -4,6 +4,7 @@ import numpy as np
 import re
 import plotly.express as px
 import openpyxl
+import requests  # ★追加: Webアクセス用
 
 # ページ設定
 st.set_page_config(page_title="配置馬券術 Web", layout="wide")
@@ -98,45 +99,78 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★追加機能: Webからオッズを取得する関数
+# ★修正: Webからオッズを取得する関数 (requestsを使用)
 def fetch_odds_from_web(url):
     """
     指定されたURLからテーブルを読み込み、馬番と単勝オッズのペアを返す
-    netkeiba等を想定
+    netkeiba等を想定。User-Agentを設定してアクセス拒否を回避。
     """
     try:
-        # pandasでHTML内のtableタグをすべて取得
-        # encodingはサイトによるが、netkeibaはeuc-jpが多い、他はutf-8
-        try:
-            dfs = pd.read_html(url, encoding='euc-jp')
-        except:
-            dfs = pd.read_html(url, encoding='utf-8')
-            
+        # ブラウザのふりをするヘッダー
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        # requestsでHTMLを取得
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status() # エラーなら例外発生
+        
+        # 文字コードの自動調整 (netkeibaはEUC-JPが多いが自動判定させる)
+        response.encoding = response.apparent_encoding
+
+        # HTMLからテーブルを抽出
+        dfs = pd.read_html(response.text)
+        
         target_df = None
         
         # オッズらしきテーブルを探す
         for df in dfs:
             # カラム名に「馬番」と「単勝」が含まれているかチェック
-            cols = [str(c).replace(' ', '') for c in df.columns]
-            if any('馬番' in c for c in cols) and any('単勝' in c for c in cols):
-                # カラム名を正規化して特定
+            cols = [str(c).replace(' ', '').replace('\n', '') for c in df.columns]
+            
+            # netkeiba等のテーブル構造に対応
+            # マルチインデックスの場合もあるのでフラットにする
+            if isinstance(df.columns, pd.MultiIndex):
+                flat_cols = []
+                for c in df.columns:
+                    flat_cols.append(''.join([str(x) for x in c if 'Unnamed' not in str(x)]))
+                cols = flat_cols
                 df.columns = cols
-                target_col_map = {c: '正番' for c in cols if '馬番' in c}
-                target_col_map.update({c: '単ｵｯｽﾞ' for c in cols if '単勝' in c})
+
+            if any('馬番' in c for c in cols) and any('単勝' in c for c in cols):
+                # カラム名を特定してリネーム
+                col_map = {}
+                for c, original_c in zip(cols, df.columns):
+                    if '馬番' in c: col_map[original_c] = '正番'
+                    elif '単勝' in c and 'オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ' # netkeibaなど
+                    elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
                 
-                target_df = df.rename(columns=target_col_map)
-                break
+                if '正番' in col_map.values() and '単ｵｯｽﾞ' in col_map.values():
+                    target_df = df.rename(columns=col_map)
+                    break
         
         if target_df is not None:
             # 必要な列だけ抽出して数値化
             res = target_df[['正番', '単ｵｯｽﾞ']].copy()
+            
+            # 文字列型の数字などをクリーニング
             res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
-            res['単ｵｯｽﾞ'] = pd.to_numeric(res['単ｵｯｽﾞ'], errors='coerce')
+            
+            # オッズに「取消」などの文字が入っている場合の対応
+            def clean_odds(x):
+                try:
+                    return float(x)
+                except:
+                    return np.nan
+            
+            res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
+            
             res = res.dropna(subset=['正番'])
             return res
         else:
             return None
     except Exception as e:
+        st.error(f"取得エラー詳細: {e}") # デバッグ用
         return None
 
 # ==========================================
@@ -412,7 +446,7 @@ def apply_ranking_logic(df_in):
         pats = str(row_pat).split(',')
         bonus = 0.0
         
-        # 1. ヒットパターン加点 (強化版 +4.0)
+        # 1. ヒットパターン加点 (トレンド) +4.0
         for p in pats:
             if p in hit_patterns and len(p) == 1: 
                 bonus += 4.0 
@@ -539,7 +573,7 @@ if uploaded_file:
                             r_tabs = st.tabs([f"{r}R" for r in race_list])
                             for r_tab, r_num in zip(r_tabs, race_list):
                                 with r_tab:
-                                    # --- オッズ取得機能 (Expander) ---
+                                    # オッズ取得ボタン
                                     with st.expander(f"🌐 {place}{r_num}R の最新オッズをWebから取得 (netkeiba)"):
                                         st.caption("netkeibaのレースページURLを貼り付けてください")
                                         url_input = st.text_input("URL", key=f"url_{place}_{r_num}")
@@ -547,11 +581,9 @@ if uploaded_file:
                                             if url_input:
                                                 new_odds_df = fetch_odds_from_web(url_input)
                                                 if new_odds_df is not None:
-                                                    # メモリ上のデータフレームを更新
                                                     target_mask = (st.session_state['analyzed_df']['場名'] == place) & \
                                                                   (st.session_state['analyzed_df']['R'] == r_num)
                                                     
-                                                    # 正番をキーにしてオッズをマージ更新
                                                     for _, o_row in new_odds_df.iterrows():
                                                         umaban = o_row['正番']
                                                         odds = o_row['単ｵｯｽﾞ']
@@ -571,7 +603,7 @@ if uploaded_file:
                                             "スコア": st.column_config.ProgressColumn("注目度", format="%.1f", min_value=0, max_value=20),
                                             "単ｵｯｽﾞ": st.column_config.NumberColumn("オッズ", format="%.1f")
                                         },
-                                        disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
+                                        disabled=["場名", "R", "馬名", "単ｵｯｽﾞ", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
                                         hide_index=True,
                                         use_container_width=True,
                                         height=300,
@@ -648,7 +680,6 @@ if uploaded_file:
                 # --- 傾向スコア加算 & 次レース表示 & 買い目 ---
                 st.markdown("### 📈 次レースの注目馬・推奨買い目")
                 
-                # apply_ranking_logic で計算済みなので、ここでは表示のみ行う
                 future_races = current_df[current_df['着順'].isna()].copy()
                 
                 if not future_races.empty:
