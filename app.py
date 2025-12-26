@@ -99,19 +99,20 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: 404エラー時の救済機能付きオッズ取得関数
-def fetch_odds_from_web(url):
+# ★修正: モード切替機能付きのオッズ取得関数
+def fetch_odds_from_web(url, force_mode=False):
     """
     指定されたURLからテーブルを読み込み、馬番と単勝オッズのペアを返す
+    force_mode=True の場合はURLの自動書き換えを行わない（過去レース用）
     """
     try:
-        original_url = url
         target_url = url
         
-        # 出馬表URLならオッズURLへの変換を試みる（まずは最新情報を狙う）
-        if "race.netkeiba.com" in url and "shutuba.html" in url:
-            target_url = url.replace("shutuba.html", "odds.html")
-            st.toast("まずはオッズ専用ページを確認します...", icon="🔄")
+        # 通常モードなら、出馬表URLをオッズURLに変換してトライする
+        if not force_mode:
+            if "race.netkeiba.com" in url and "shutuba.html" in url:
+                target_url = url.replace("shutuba.html", "odds.html")
+                # st.toast("最新情報を取得するため、オッズ専用ページを確認しています...", icon="🔄")
 
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -119,18 +120,19 @@ def fetch_odds_from_web(url):
         
         response = None
         
-        # 1. まず変換後のURL（odds.html）でトライ
+        # 取得トライ
         try:
             response = requests.get(target_url, headers=headers, timeout=10)
-            response.raise_for_status() # 404ならここで例外へ
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404 and target_url != original_url:
-                # 2. 404（ページなし）なら、過去レースと判断して元のURL（shutuba.html）に戻す
-                st.warning("オッズ専用ページが見つかりませんでした（過去レースの可能性があります）。元のURLから読み込みます。")
-                response = requests.get(original_url, headers=headers, timeout=10)
+            response.raise_for_status() # 404なら例外へ
+        except requests.exceptions.HTTPError:
+            # 自動変換して失敗した場合、またはそもそもページがない場合
+            if not force_mode and target_url != url:
+                st.warning("最新オッズページが見つかりません。元のURL（過去レース/出馬表）から読み込みます。")
+                response = requests.get(url, headers=headers, timeout=10)
                 response.raise_for_status()
             else:
-                raise e # その他のエラーはそのまま投げる
+                st.error("ページが見つかりませんでした (404 Not Found)。URLを確認してください。")
+                return None
 
         response.encoding = response.apparent_encoding
 
@@ -158,9 +160,10 @@ def fetch_odds_from_web(url):
                 cols = flat_cols
                 df.columns = cols
 
-            # --- 列名の判定 ---
+            # --- 列名の判定 (緩和版) ---
+            # 馬番があるか
             has_umaban = any('馬番' in c for c in cols)
-            # 「単勝」「オッズ」「人気」「予想」のいずれかがあればOKとする
+            # オッズ系の言葉があるか
             has_odds = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気', '予想'])
 
             if has_umaban and has_odds:
@@ -169,11 +172,15 @@ def fetch_odds_from_web(url):
                     if '馬番' in c: 
                         col_map[original_c] = '正番'
                     
-                    # オッズ列の優先順位判定
+                    # オッズ列の特定
                     elif '単勝' in c and 'オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
                     elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
-                    elif '予想オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ' # 出馬表対応
-                    elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_c] = '単ｵｯｽﾞ'
+                    elif '予想オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
+                    elif '人気' in c and '単ｵｯｽﾞ' not in col_map.values(): 
+                        # 最終手段：もしオッズ列がなく人気列しかなければ、いったんそれを確保（後で数値チェック）
+                        pass 
+                    elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): 
+                        col_map[original_c] = '単ｵｯｽﾞ'
                 
                 if '正番' in col_map.values() and '単ｵｯｽﾞ' in col_map.values():
                     target_df = df.rename(columns=col_map)
@@ -185,7 +192,9 @@ def fetch_odds_from_web(url):
             
             def clean_odds(x):
                 try: 
-                    return float(x)
+                    # --- や 取消 を除外
+                    val = float(x)
+                    return val
                 except: 
                     return np.nan
             
@@ -193,7 +202,9 @@ def fetch_odds_from_web(url):
             res = res.dropna(subset=['正番'])
             return res
         else:
-            st.error("有効なオッズ情報が見つかりませんでした。")
+            st.error("オッズ情報が含まれる表が見つかりませんでした。")
+            # デバッグ用: 見つかったカラムを表示
+            # st.write("検出されたテーブル列名:", [list(d.columns) for d in dfs])
             return None
 
     except Exception as e:
@@ -600,13 +611,19 @@ if uploaded_file:
                             r_tabs = st.tabs([f"{r}R" for r in race_list])
                             for r_tab, r_num in zip(r_tabs, race_list):
                                 with r_tab:
-                                    # オッズ取得ボタン
+                                    # --- オッズ取得機能 (修正版) ---
                                     with st.expander(f"🌐 {place}{r_num}R の最新オッズをWebから取得 (netkeiba)"):
-                                        st.caption("netkeibaのレースページURLを貼り付けてください（出馬表のURLでもOKです）")
-                                        url_input = st.text_input("URL", key=f"url_{place}_{r_num}")
+                                        st.caption("出馬表や結果ページのURLを貼り付けてください")
+                                        
+                                        col_url, col_force = st.columns([3, 1])
+                                        with col_url:
+                                            url_input = st.text_input("URL", key=f"url_{place}_{r_num}")
+                                        with col_force:
+                                            force_mode = st.checkbox("URL自動変換しない\n(過去/確定レース用)", key=f"force_{place}_{r_num}")
+                                        
                                         if st.form_submit_button(f"📥 {place}{r_num}R オッズ取得・更新"):
                                             if url_input:
-                                                new_odds_df = fetch_odds_from_web(url_input)
+                                                new_odds_df = fetch_odds_from_web(url_input, force_mode)
                                                 if new_odds_df is not None:
                                                     target_mask = (st.session_state['analyzed_df']['場名'] == place) & \
                                                                   (st.session_state['analyzed_df']['R'] == r_num)
