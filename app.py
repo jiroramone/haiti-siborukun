@@ -112,19 +112,16 @@ def fetch_odds_from_web(url):
         response.raise_for_status()
         response.encoding = response.apparent_encoding
 
-        # ★修正: lxmlを明示的に使用
+        # ★修正: flavor指定を削除して自動判定させる (lxmlがない場合への対処)
         try:
-            dfs = pd.read_html(response.text, flavor='lxml')
-        except ImportError:
-            st.error("⚠️ エラー: 'lxml' ライブラリが見つかりません。requirements.txt に 'lxml' を追加してください。")
+            dfs = pd.read_html(response.text)
+        except ImportError as e:
+            # lxmlやhtml5libが全くない場合の最後通告
+            st.error(f"⚠️ ライブラリ不足エラー: {e} \n requirements.txtに 'lxml' を追加して再起動してください。")
             return None
-        except Exception:
-            # lxmlで失敗した場合のバックアップ
-            try:
-                dfs = pd.read_html(response.text)
-            except Exception as e:
-                st.error(f"HTML解析エラー: {e}")
-                return None
+        except Exception as e:
+            st.error(f"HTML解析エラー: {e}")
+            return None
         
         target_df = None
         for df in dfs:
@@ -293,6 +290,7 @@ def analyze_logic(df_curr, df_prev=None):
                             neighbor_odds = pd.to_numeric(t_row.get('単ｵｯｽﾞ'), errors='coerce')
                             neighbor_score = 9.0
                             
+                            # 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
                             if pd.notna(blue_odds) and pd.notna(neighbor_odds):
                                 if neighbor_odds < blue_odds:
                                     neighbor_score += 2.0
