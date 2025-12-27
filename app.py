@@ -74,7 +74,7 @@ def analyze_haichi(df_curr, df_prev=None):
     df['スコア'] = 0.0
     idx_map = {(row['場名'], row['R'], row['正番']): idx for idx, row in df.iterrows()}
 
-    # A. 青塗
+    # A. 青塗 (当日内全鞍共通)
     blue_info = []
     for col in ['騎手', '厩舎', '馬主']:
         group_keys = ['場名', col] if col == '騎手' else [col]
@@ -130,8 +130,8 @@ def analyze_haichi(df_curr, df_prev=None):
     # D. 前日リンク
     if df_prev is not None and not df_prev.empty:
         for idx, row in df.iterrows():
-            prev_rows = df_prev[(df_prev['場名'] == row['場名']) & (df_prev['R'] == row['R']) & (df_prev['騎手'] == row['騎手'])]
-            for _, p_row in prev_rows.iterrows():
+            prev_match = df_prev[(df_prev['場名'] == row['場名']) & (df_prev['R'] == row['R']) & (df_prev['騎手'] == row['騎手'])]
+            for _, p_row in prev_match.iterrows():
                 if {row['正番'],row['逆番'],row['正循環'],row['逆循環']}.intersection({p_row['正番'],p_row['逆番'],p_row['正循環'],p_row['逆循環']}):
                     df.at[idx, 'タイプ_list'].append('★前日同配置'); df.at[idx, '属性_list'].append(f'前日:騎手:{row["騎手"]}'); df.at[idx, 'パターン_list'].append('前日'); df.at[idx, 'スコア'] += 8.3
 
@@ -140,29 +140,52 @@ def analyze_haichi(df_curr, df_prev=None):
     df['パターン'] = df['パターン_list'].apply(lambda x: ','.join(x) if isinstance(x, list) else x)
     return df
 
-# --- 4. 判定ロジック ---
+# --- 4. 判定ロジック (エネルギー属性明示版) ---
 def apply_ranking_logic(df_in):
     if df_in.empty: return df_in
     df = df_in.copy()
     df['着順'] = pd.to_numeric(df['着順'], errors='coerce')
+    
+    # 3着以内に入った属性を特定
     hit_results = df[df['着順'] <= 3]
     hit_attrs = set()
     for _, row in hit_results.iterrows():
-        for a in str(row.get('属性', '')).split(' / '):
-            hit_attrs.add(a.replace('隣:', '').replace('前日:', ''))
+        raw_attrs = str(row.get('属性', '')).split(' / ')
+        for a in raw_attrs:
+            # 属性（騎手:〇〇など）をそのままブラックリストに登録
+            clean_a = a.replace('隣:', '').replace('前日:', '')
+            hit_attrs.add(clean_a)
+
     hit_patterns = set([p for pats in hit_results['パターン'].dropna() for p in str(pats).split(',') if p])
 
     def get_final_metrics(row):
-        score = row.get('スコア', 0); p_list = str(row.get('パターン', '')).split(',')
+        score = row.get('スコア', 0)
+        p_list = str(row.get('パターン', '')).split(',')
         trend_bonus = 4.0 if any(p in hit_patterns and len(p)==1 for p in p_list) else 0.0
-        consumption_penalty = -3.0 if any(ra.replace('隣:', '').replace('前日:', '') in hit_attrs for ra in str(row.get('属性', '')).split(' / ')) else 0.0
+        
+        # エネルギー消費減点判定 & 属性特定
+        consumption_penalty = 0.0
+        penalty_reasons = []
+        row_attrs = str(row.get('属性', '')).split(' / ')
+        for ra in row_attrs:
+            clean_ra = ra.replace('隣:', '').replace('前日:', '')
+            if clean_ra in hit_attrs:
+                consumption_penalty = -3.0
+                # 属性名（騎手、厩舎、馬主）を抽出
+                attr_type = clean_ra.split(':')[0] if ':' in clean_ra else "本人"
+                penalty_reasons.append(attr_type)
+        
+        penalty_msg = f"⚠️好走済({','.join(set(penalty_reasons))})(-3)" if penalty_reasons else ""
+        
         odds_penalty = -30.0 if pd.to_numeric(row.get('単ｵｯｽﾞ'), errors='coerce') > 49.9 else 0.0
         total = score + trend_bonus + consumption_penalty + odds_penalty
+        
         if total >= 15: rec = "👑 盤石の軸"
         elif total >= 12: rec = "✨ 推奨軸"
         elif total >= 10: rec = "🔥 激熱相手"
         else: rec = "▲ 配置注目" if score > 0 else ""
-        return pd.Series([total, trend_bonus, consumption_penalty, rec, "⚠️好走済(-3)" if consumption_penalty < 0 else ""])
+            
+        return pd.Series([total, trend_bonus, consumption_penalty, rec, penalty_msg])
 
     df[['総合スコア', '傾向加点', '消費減点', '推奨買い目', 'エネルギー状態']] = df.apply(get_final_metrics, axis=1)
     return df
@@ -189,8 +212,8 @@ if up_curr:
         
         full_df = st.session_state['analyzed_df']
 
-        # ① 結果入力エリア (上段)
-        st.subheader("📝 結果入力 (配置発生馬のみ表示)")
+        # ① 結果入力エリア
+        st.subheader("📝 結果入力 (配置馬のみ)")
         places = sorted(full_df['場名'].unique())
         with st.form("result_form"):
             p_tabs = st.tabs(places)
@@ -198,9 +221,8 @@ if up_curr:
             for p_tab, place in zip(p_tabs, places):
                 with p_tab:
                     p_df = full_df[full_df['場名'] == place]
-                    r_nums = sorted(p_df['R'].unique())
-                    r_tabs = st.tabs([f"{r}R" for r in r_nums])
-                    for r_tab, r_num in zip(r_tabs, r_nums):
+                    r_tabs = st.tabs([f"{r}R" for r in sorted(p_df['R'].unique())])
+                    for r_tab, r_num in zip(r_tabs, sorted(p_df['R'].unique())):
                         with r_tab:
                             race_full = p_df[p_df['R'] == r_num].sort_values('正番')
                             disp = race_full[race_full['スコア'] > 0].copy()
@@ -210,63 +232,40 @@ if up_curr:
                                 updated_race = race_full.copy()
                                 for _, row in ed.iterrows(): updated_race.loc[updated_race['正番'] == row['正番'], '着順'] = row['着順']
                                 edited_dfs.append(updated_race)
-            if st.form_submit_button("🔄 入力を確定して全体を更新"):
+            if st.form_submit_button("🔄 確定して更新"):
                 combined = pd.concat(edited_dfs, ignore_index=True)
                 st.session_state['analyzed_df'] = apply_ranking_logic(combined); st.rerun()
 
-        # ② 推奨馬リスト (中段・タブ分け)
+        # ② 推奨馬リスト
         st.divider()
-        st.subheader("👑 特選推奨馬 (未確定・期待値10点以上)")
+        st.subheader("👑 特選推奨馬")
         future_df = full_df[(full_df['着順'].isna()) & (full_df['総合スコア'] >= 10)]
         if not future_df.empty:
-            f_places = sorted(future_df['場名'].unique()); f_p_tabs = st.tabs(f_places)
-            for f_p_tab, place in zip(f_p_tabs, f_places):
+            f_p_tabs = st.tabs(sorted(future_df['場名'].unique()))
+            for f_p_tab, place in zip(f_p_tabs, sorted(future_df['場名'].unique())):
                 with f_p_tab:
                     p_future = future_df[future_df['場名'] == place]
                     f_r_tabs = st.tabs([f"{r}R" for r in sorted(p_future['R'].unique())])
                     for f_r_tab, r_num in zip(f_r_tabs, sorted(p_future['R'].unique())):
                         with f_r_tab:
-                            target = p_future[p_future['R'] == r_num].sort_values('総合スコア', ascending=False)
-                            st.dataframe(target[['正番','馬名','単ｵｯｽﾞ','タイプ','属性','エネルギー状態','総合スコア','推奨買い目']], use_container_width=True, hide_index=True)
-        else: st.write("現在、推奨馬はいません。")
+                            st.dataframe(p_future[p_future['R'] == r_num].sort_values('総合スコア', ascending=False)[['正番','馬名','単ｵｯｽﾞ','属性','エネルギー状態','総合スコア','推奨買い目']], use_container_width=True, hide_index=True)
 
-        # ③ 的中統計 ＆ 分析グラフ (下段・場別タブ分け)
+        # ③ 統計 ＆ 分析グラフ
         st.divider()
-        st.subheader("📈 的中傾向の集計・分析 (開催場別)")
-        
+        st.subheader("📈 的中傾向 (会場別)")
         df_results = full_df[full_df['着順'].notna()].copy()
-        stat_places = ["合計"] + sorted(full_df['場名'].unique())
-        s_tabs = st.tabs(stat_places)
-        
-        for s_tab, s_place in zip(s_tabs, stat_places):
+        s_tabs = st.tabs(["合計"] + sorted(full_df['場名'].unique()))
+        for s_tab, s_place in zip(s_tabs, ["合計"] + sorted(full_df['場名'].unique())):
             with s_tab:
-                # データの抽出
                 df_s = df_results if s_place == "合計" else df_results[df_results['場名'] == s_place]
                 df_fuku = df_s[df_s['着順'] <= 3]
-                
-                if df_s.empty:
-                    st.info(f"{s_place} の的中データはまだありません。")
+                if df_s.empty: st.info("データなし")
                 else:
-                    col_metrics, col_chart = st.columns([1, 2])
-                    
-                    with col_metrics:
-                        st.write(f"#### 📊 {s_place} 的中統計")
+                    c_m, c_c = st.columns([1, 2])
+                    with c_m:
                         st.metric("消化レース", len(df_s['R'].unique()))
-                        rate = len(df_fuku)/len(df_s)*100 if len(df_s)>0 else 0
-                        st.metric("注目馬 複勝率", f"{rate:.1f}%")
+                        st.metric("注目馬 複勝率", f"{len(df_fuku)/len(df_s)*100 if len(df_s)>0 else 0:.1f}%")
                         st.metric("的中数", f"{len(df_fuku)} 頭")
-                    
-                    with col_chart:
-                        if not df_fuku.empty:
-                            # 的中パターンの集計
-                            all_p = [p for pats in df_fuku['パターン'] for p in str(pats).split(',') if p]
-                            if all_p:
-                                df_plot = pd.Series(all_p).value_counts().reset_index()
-                                df_plot.columns = ['パターン', '的中数']
-                                fig = px.pie(df_plot, values='的中数', names='パターン', 
-                                             title=f'【{s_place}】 的中パターン分析', hole=0.4)
-                                st.plotly_chart(fig, use_container_width=True)
-                            else:
-                                st.write("集計可能なパターンがありません。")
-                        else:
-                            st.write("3着以内の馬がいません。")
+                    with c_c:
+                        all_p = [p for pats in df_fuku['パターン'] for p in str(pats).split(',') if p]
+                        if all_p: st.plotly_chart(px.pie(pd.Series(all_p).value_counts().reset_index(), values='count', names='index', title=f'【{s_place}】的中パターン', hole=0.4), use_container_width=True)
