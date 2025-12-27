@@ -4,7 +4,6 @@ import numpy as np
 import re
 import plotly.express as px
 import openpyxl
-from collections import Counter  # 【重要】修正: これがないと動きません
 
 # ページ設定
 st.set_page_config(page_title="配置馬券術 Web", layout="wide")
@@ -65,15 +64,12 @@ def load_data(file):
     # --- データ整形 ---
     df.columns = df.columns.str.strip()
     
-    # 表記ゆれ吸収
     rename_map = {
-        '場所': '場名', '開催': '場名', 
+        '場所': '場名', '開催': '場名', '単オッズ': '単ｵｯｽﾞ', 
         '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎',
         '騎手名': '騎手',
         'レース': 'R', 'Ｒ': 'R', 'レース名': 'R',
-        '着': '着順', '着 順': '着順', '番': '正番', '馬番': '正番',
-        # オッズのゆらぎ対応
-        '単オッズ': '単ｵｯｽﾞ', '単勝オッズ': '単ｵｯｽﾞ', 'オッズ': '単ｵｯｽﾞ', '単勝': '単ｵｯｽﾞ', '単': '単ｵｯｽﾞ'
+        '着': '着順', '着 順': '着順', '番': '正番', '馬番': '正番'
     }
     df = df.rename(columns=rename_map)
 
@@ -156,103 +152,68 @@ def get_pair_pattern(row1, row2):
              if r1[i] is not None and r2[j] is not None and r1[i] == r2[j] and r1[i] != 0]
     return ",".join(pairs)
 
-# =======================================================
-# 分析ロジック (修正済み完全版)
-# =======================================================
+def get_common_values(group):
+    cols = ['正番', '計算_逆番', '計算_正循環', '計算_逆循環']
+    common_set = None
+    for _, row in group.iterrows():
+        current_set = set()
+        for col in cols:
+            val = row.get(col)
+            if pd.notna(val):
+                try:
+                    num = int(float(val))
+                    if num != 0: current_set.add(num)
+                except: continue
+        if common_set is None: common_set = current_set
+        else: common_set = common_set.intersection(current_set)
+        if not common_set: return None
+    if common_set: return ','.join(map(str, sorted(list(common_set))))
+    return None
+
 def analyze_logic(df_curr, df_prev=None):
-    # --- 1. 配置数の計算 ---
     df_curr = calc_haichi_numbers(df_curr)
     if df_prev is not None and not df_prev.empty:
         df_prev = calc_haichi_numbers(df_prev)
     
     rec_list = []
     
-    # =======================================================
-    # A. 青塗 (修正版: グループ内重複検出ロジック)
-    # =======================================================
+    # A. 青塗
     blue_keys = set()
-    
-    # 騎手、厩舎、馬主すべて「場名」を含めてグルーピングする
     for col in ['騎手', '厩舎', '馬主']:
         if col not in df_curr.columns: continue
         
-        # 場名を含めてグループ化 (修正箇所: 開催場またぎのバグ防止)
-        group_keys = ['場名', col]
-        
+        if col == '騎手': group_keys = ['場名', col]
+        else: group_keys = [col]
         try:
             for name_key, group in df_curr.groupby(group_keys):
                 if len(group) < 2: continue
-                
-                # name_keyは (場名, 名前) のタプルになる
-                place_name = name_key[0]
-                target_name = name_key[1]
+                target_name = name_key[1] if col == '騎手' else name_key
                 if not target_name: continue
-
-                # グループ内の「数字の出現頻度」を調べる
-                all_numbers = []
-                horse_numbers_map = {} # {index: {num1, num2...}}
-
-                target_cols = ['正番', '計算_逆番', '計算_正循環', '計算_逆循環']
-
-                for idx, row in group.iterrows():
-                    my_nums = set()
-                    for c in target_cols:
-                        val = row.get(c)
-                        if pd.notna(val):
-                            try:
-                                # 文字列の '1.0' 等にも対応
-                                n = int(float(val))
-                                if n != 0: my_nums.add(n)
-                            except:
-                                continue
-                    
-                    horse_numbers_map[idx] = my_nums
-                    all_numbers.extend(list(my_nums))
-
-                # 出現回数が2回以上の数字（共通数字）を特定 (修正箇所: 全一致→重複検出に変更)
-                counts = Counter(all_numbers)
-                common_vals = {num for num, cnt in counts.items() if cnt >= 2}
-
-                # 共通数字を持っている馬だけを抽出してレコード追加
+                common_vals = get_common_values(group)
                 if common_vals:
+                    all_races_display = [f"{r['場名']}{r['R']}" for _, r in group.iterrows()]
+                    
                     priority = 1.0 if col == '騎手' else 0.2
                     
-                    for idx, row in group.iterrows():
-                        my_nums = horse_numbers_map.get(idx, set())
-                        # この馬が持っている数字の中に、共通数字が含まれているか？
-                        matched_nums = my_nums.intersection(common_vals)
-                        
-                        if matched_nums:
-                            matched_str = ','.join(map(str, sorted(matched_nums)))
-                            
-                            # 自分以外の同属性馬を探して表示用に整形
-                            others = []
-                            for o_idx, o_row in group.iterrows():
-                                if idx == o_idx: continue
-                                o_nums = horse_numbers_map.get(o_idx, set())
-                                if not o_nums.isdisjoint(matched_nums):
-                                    others.append(f"{o_row['R']}R")
-                            
-                            other_races_str = ",".join(sorted(list(set(others))))
-                            remark = f'[{col}] 共通({matched_str}) [他:{other_races_str}]'
-                            
-                            rec_list.append({
-                                '場名': row['場名'], 'R': row['R'], '正番': row['正番'], '馬名': row['馬名'],
-                                '単ｵｯｽﾞ': row.get('単ｵｯｽﾞ', np.nan),
-                                '属性': f"{col}:{target_name}", 
-                                'タイプ': f'★ {col}青塗', 
-                                'パターン': '青', 
-                                '条件': remark,
-                                'スコア': 9.0 + priority
-                            })
-                            blue_keys.add((row['場名'], row['R'], row['馬名'], f"{col}:{target_name}"))
+                    for _, row in group.iterrows():
+                        current_race_str = f"{row['場名']}{row['R']}"
+                        other_races = [s for s in all_races_display if s != current_race_str]
+                        other_races = sorted(list(set(other_races)))
+                        remark = f'[{col}] 共通値({common_vals}) [他:{",".join(other_races)}]'
+                        odds_val = row.get('単ｵｯｽﾞ', np.nan)
+                        rec_list.append({
+                            '場名': row['場名'], 'R': row['R'], '正番': row['正番'], '馬名': row['馬名'],
+                            '単ｵｯｽﾞ': odds_val,
+                            '属性': f"{col}:{target_name}", 
+                            'タイプ': f'★ {col}青塗', 
+                            'パターン': '青', 
+                            '条件': remark,
+                            'スコア': 9.0 + priority
+                        })
+                        blue_keys.add((row['場名'], row['R'], row['馬名'], row['属性']))
+        except: continue
 
-        except Exception as e:
-            continue
-
-    # =======================================================
     # B. 青塗の隣
-    # =======================================================
     if blue_keys:
         blue_lookup = {}
         for b in blue_keys:
@@ -275,6 +236,7 @@ def analyze_logic(df_curr, df_prev=None):
                 
                 curr_num = int(b_row['正番'])
                 source_attr = b_info['属性']
+                
                 blue_odds = pd.to_numeric(b_row.get('単ｵｯｽﾞ'), errors='coerce')
                 
                 for t_num in [curr_num - 1, curr_num + 1]:
@@ -284,6 +246,7 @@ def analyze_logic(df_curr, df_prev=None):
                             neighbor_odds = pd.to_numeric(t_row.get('単ｵｯｽﾞ'), errors='coerce')
                             neighbor_score = 9.0
                             
+                            # 隣のオッズ < 本体のオッズ ならスコア加算 (逆転)
                             if pd.notna(blue_odds) and pd.notna(neighbor_odds):
                                 if neighbor_odds < blue_odds:
                                     neighbor_score += 2.0
@@ -298,9 +261,7 @@ def analyze_logic(df_curr, df_prev=None):
                                 'スコア': neighbor_score
                             })
 
-    # =======================================================
     # C. 通常ペア (騎手)
-    # =======================================================
     if '騎手' in df_curr.columns:
         for (place, name), group in df_curr.groupby(['場名', '騎手']):
             if len(group) < 2: continue
@@ -324,15 +285,11 @@ def analyze_logic(df_curr, df_prev=None):
                         '条件': f"[騎手] ペア({curr['R']}R #{curr['正番']})", 'スコア': base_score + 1.0
                     })
 
-    # =======================================================
     # C. 通常ペア (厩舎・馬主)
-    # =======================================================
     for col in ['厩舎', '馬主']:
         if col not in df_curr.columns: continue
-        # 修正: ここも場名を含めてグルーピング
-        for group_key, group in df_curr.groupby(['場名', col]):
+        for name, group in df_curr.groupby(col):
             if len(group) < 2: continue
-            name = group_key[1]
             group = group.sort_values(['R', '場名']).to_dict('records')
             for i in range(len(group)-1):
                 curr, next_r = group[i], group[i+1]
@@ -356,9 +313,7 @@ def analyze_logic(df_curr, df_prev=None):
                         '条件': cond_next, 'スコア': base_score + bonus
                     })
 
-    # =======================================================
     # D. 前日同配置
-    # =======================================================
     if df_prev is not None and not df_prev.empty:
         for idx, row in df_curr.iterrows():
             race = row['R']
@@ -385,16 +340,13 @@ def analyze_logic(df_curr, df_prev=None):
                         'スコア': 8.3
                     })
 
-    # =======================================================
-    # 集計処理
-    # =======================================================
     if not rec_list:
         return pd.DataFrame()
         
     res_df = pd.DataFrame(rec_list)
     
     agg_funcs = {
-        '単ｵｯｽﾞ': 'min',
+        '単ｵｯｽﾞ': 'min', 
         '属性': lambda x: ' + '.join(sorted(set(x))),
         'タイプ': lambda x: ' / '.join(sorted(set(x), key=lambda s: 0 if '★' in s else 1)), 
         'パターン': lambda x: ','.join(sorted(set(x))),
@@ -465,8 +417,7 @@ if uploaded_file:
             
             full_df = st.session_state['analyzed_df'].copy()
             places = sorted(full_df['場名'].unique())
-            
-            display_cols = ['場名', 'R', '正番', '馬名', '単ｵｯｽﾞ', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
+            display_cols = ['場名', 'R', '正番', '馬名', '属性', 'タイプ', 'パターン', '条件', 'スコア', '着順']
             
             with st.form("result_entry_form"):
                 place_tabs = st.tabs(places)
@@ -485,10 +436,9 @@ if uploaded_file:
                                         race_data,
                                         column_config={
                                             "着順": st.column_config.NumberColumn("着順", format="%d", min_value=1, max_value=18),
-                                            "スコア": st.column_config.ProgressColumn("注目度", format="%.1f", min_value=0, max_value=20),
-                                            "単ｵｯｽﾞ": st.column_config.NumberColumn("オッズ", format="%.1f")
+                                            "スコア": st.column_config.ProgressColumn("注目度", format="%.1f", min_value=0, max_value=20)
                                         },
-                                        disabled=["場名", "R", "馬名", "単ｵｯｽﾞ", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
+                                        disabled=["場名", "R", "馬名", "正番", "属性", "タイプ", "パターン", "条件", "スコア"],
                                         hide_index=True,
                                         use_container_width=True,
                                         height=300,
@@ -558,7 +508,7 @@ if uploaded_file:
                                     lambda x: f":blue[**{x['馬名']}**]" if '青' in str(x['パターン']) else x['馬名'], 
                                     axis=1
                                 )
-                                st.dataframe(place_hits_disp[['R', '馬名', '単ｵｯｽﾞ', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
+                                st.dataframe(place_hits_disp[['R', '馬名', '属性', 'タイプ', '着順']], use_container_width=True, hide_index=True)
 
                 # --- 傾向スコア加算 & 次レース表示 & 買い目 ---
                 st.markdown("### 📈 次レースの注目馬・推奨買い目")
@@ -589,7 +539,7 @@ if uploaded_file:
                         # 1. ヒットパターン加点
                         for p in pats:
                             if p in hit_patterns and len(p) == 1: 
-                                bonus += 4.0 
+                                bonus += 2.0 
                         
                         # 2. 青塗処理 (隣ヒットによる減点)
                         if '青' in pats:
@@ -599,10 +549,11 @@ if uploaded_file:
                                     bonus -= 3.0
                                     break
                         
-                        # 3. 高オッズによる減点
+                        # 3. 高オッズによる減点（全パターン共通、50倍以上は圏外へ）
+                        # ★修正: 確実に数値変換してから判定
                         odds = pd.to_numeric(row.get('単ｵｯｽﾞ'), errors='coerce')
                         if pd.notna(odds) and odds > 49.9:
-                            bonus -= 30.0
+                            bonus -= 30.0 # 強烈なペナルティ
                                 
                         return bonus
 
@@ -667,7 +618,9 @@ if uploaded_file:
                                             top_horses = target_df.head(3)
                                             if len(top_horses) >= 2:
                                                 h1 = top_horses.iloc[0]
+                                                h2 = top_horses.iloc[1]
                                                 h1_score = h1['総合スコア']
+                                                h2_score = h2['総合スコア']
                                                 h1_name = str(h1['馬名']).replace(':blue[**', '').replace('**]', '')
                                                 
                                                 h1_odds = h1.get('単ｵｯｽﾞ', np.nan)
