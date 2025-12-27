@@ -99,103 +99,95 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: ヘッダー探索強化 & 診断ログ機能付きオッズ取得関数
+# ★修正: 強力なデコードとパーサー総当たりを行う関数
 def fetch_odds_from_web(url, force_mode=False):
     
     def try_fetch(target_url):
         try:
+            # User-Agent偽装 (最新のChromeに擬態)
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             }
-            response = requests.get(target_url, headers=headers, timeout=10)
+            response = requests.get(target_url, headers=headers, timeout=15)
             response.raise_for_status()
             
+            # --- 文字コードの強制処理 ---
+            # netkeibaはEUC-JPだが、requestsの自動判定が失敗することがあるため手動でデコード
+            html_content = ""
             if "netkeiba" in target_url:
-                response.encoding = 'euc-jp'
+                html_content = response.content.decode('euc-jp', errors='ignore')
+            elif "yahoo" in target_url:
+                html_content = response.content.decode('utf-8', errors='ignore')
             else:
-                response.encoding = response.apparent_encoding
+                html_content = response.text # その他は自動
 
-            # 複数のヘッダー位置を試す (0行目、1行目)
-            possible_dfs = []
+            # HTML解析 (lxml -> bs4 -> html5lib の順で総当たり)
+            dfs = []
+            parsers = ['lxml', 'bs4', 'html5lib']
             
-            # パターン1: ヘッダーなしで全部読む
-            try:
-                raw_dfs = pd.read_html(response.text, header=None) # ヘッダーなしで取得
-                possible_dfs.extend([(d, "header=None") for d in raw_dfs])
-            except: pass
-
-            # パターン2: 0行目をヘッダーとする
-            try:
-                h0_dfs = pd.read_html(response.text, header=0)
-                possible_dfs.extend([(d, "header=0") for d in h0_dfs])
-            except: pass
+            for parser in parsers:
+                try:
+                    # header=None, 0, 1 を順に試す必要はない、pandasが一番いい感じのを探すのを期待しつつ、
+                    # 念のため match パラメータで「馬番」が含まれるテーブルに絞る
+                    dfs = pd.read_html(html_content, flavor=parser)
+                    if dfs: break # 見つかったらループ終了
+                except:
+                    continue
             
-            # パターン3: 1行目をヘッダーとする (netkeibaの出馬表はこれが多い)
-            try:
-                h1_dfs = pd.read_html(response.text, header=1)
-                possible_dfs.extend([(d, "header=1") for d in h1_dfs])
-            except: pass
-
-            if not possible_dfs: return None, "No tables found in page source"
+            if not dfs:
+                # pandasだけで無理なら、単純なテーブル検索を試みる
+                return None, f"No tables found using parsers: {parsers}"
 
             target_df = None
             debug_logs = []
 
-            for i, (df, mode) in enumerate(possible_dfs):
-                # カラム名の正規化 (MultiIndexなら結合、文字列なら空白削除)
+            for i, df in enumerate(dfs):
+                # カラム名の正規化
+                cols = [str(c).replace(' ', '').replace('　', '').replace('\n', '').replace('\r', '') for c in df.columns]
+                
                 if isinstance(df.columns, pd.MultiIndex):
-                    cols = []
+                    flat_cols = []
                     for c in df.columns:
                         col_str = ''.join([str(x) for x in c if 'Unnamed' not in str(x)])
-                        cols.append(col_str)
-                else:
-                    cols = [str(c) for c in df.columns]
+                        col_str = col_str.replace(' ', '').replace('　', '').replace('\n', '')
+                        flat_cols.append(col_str)
+                    cols = flat_cols
+                    df.columns = cols
                 
-                # クリーニング
-                clean_cols = [c.replace(' ', '').replace('　', '').replace('\n', '').replace('\r', '') for c in cols]
-                
-                # ログに記録 (デバッグ用)
-                debug_logs.append(f"Table {i} ({mode}): {clean_cols[:10]}...") 
+                debug_logs.append(f"T{i}: {cols[:5]}...") # ログ用
 
                 # --- 判定ロジック ---
-                has_umaban = any('馬番' in c for c in clean_cols)
-                has_odds_related = any(x in c for c in clean_cols for x in ['単勝', 'オッズ', '人気', '予想'])
+                has_umaban = any('馬番' in c for c in cols) or any('枠番' in c for c in cols) # Yahooは枠番と馬番が近い
+                
+                # オッズ関連キーワード
+                has_odds_related = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気', '予想'])
 
-                # ヘッダーなし(header=None)の場合、行の中に「馬番」という文字が含まれているか探す
-                if mode == "header=None":
-                    # データフレームの中身を文字列にして検索
-                    if df.astype(str).apply(lambda x: x.str.contains('馬番', na=False)).any().any():
-                        # ここは複雑になるので今回はスキップし、ヘッダーありパターンを優先
-                        pass
-
-                if has_umaban and has_odds_related:
+                if has_umaban:
                     col_map = {}
-                    for original_col, clean_col in zip(df.columns, clean_cols):
-                        if '馬番' in clean_col: 
-                            col_map[original_col] = '正番'
-                        
-                        elif '単勝' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
-                        elif '予想オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
-                        elif 'オッズ' in clean_col and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_col] = '単ｵｯｽﾞ'
-                        elif '人気' in clean_col and '単ｵｯｽﾞ' not in col_map.values(): 
-                            pass 
+                    for c, original_c in zip(cols, df.columns):
+                        if '馬番' in c: col_map[original_c] = '正番'
+                        elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
+                        elif '予想オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
+                        elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_c] = '単ｵｯｽﾞ'
+                        elif '人気' in c and '単ｵｯｽﾞ' not in col_map.values(): 
+                            # 人気しかない場合（オッズ未発表時など）
+                            pass
 
-                    # 正番が見つかったら採用候補
                     if '正番' in col_map.values():
-                        # オッズ列がない場合の最終手段
+                        # オッズ列が見つからない場合の救済: 人気があればそれを読む
                         if '単ｵｯｽﾞ' not in col_map.values():
-                            for original_col, clean_col in zip(df.columns, clean_cols):
-                                if '人気' in clean_col:
-                                    col_map[original_col] = '単ｵｯｽﾞ' # 仮
+                             for c, original_c in zip(cols, df.columns):
+                                if '人気' in c:
+                                    col_map[original_c] = '単ｵｯｽﾞ' # 仮
                                     break
                         
+                        # それでもなければ、Yahoo競馬対応など (Yahooは '単勝' がある)
                         if '単ｵｯｽﾞ' in col_map.values():
                             target_df = df.rename(columns=col_map)
                             break
             
             if target_df is not None:
                 res = target_df[['正番', '単ｵｯｽﾞ']].copy()
-                # 数字以外の文字が含まれていても強制変換
                 res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
                 
                 def clean_odds(x):
@@ -205,11 +197,9 @@ def fetch_odds_from_web(url, force_mode=False):
                 res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
                 res = res.dropna(subset=['正番'])
                 
-                if res.empty:
-                     return None, "Columns found but rows are empty after cleaning"
-
+                # オッズが全てNaNなら警告
                 if res['単ｵｯｽﾞ'].isna().all():
-                    st.toast("⚠️ オッズ数値なし。馬番のみ読み込みます。", icon="ℹ️")
+                    return res, "⚠️ Data loaded, but odds are all NaN/Empty."
                     
                 return res, "Success"
             
@@ -220,6 +210,8 @@ def fetch_odds_from_web(url, force_mode=False):
 
     # --- メイン処理 ---
     target_url = url
+    
+    # URL自動変換 (force_modeがOFFの場合)
     if not force_mode:
         if "sp.netkeiba.com" in target_url:
             target_url = target_url.replace("sp.netkeiba.com", "race.netkeiba.com")
@@ -229,29 +221,33 @@ def fetch_odds_from_web(url, force_mode=False):
     result_df, msg = try_fetch(target_url)
     
     if result_df is None or result_df.empty:
+        # フォールバック処理
         if target_url != url:
             fallback_url = url
+            # フォールバック時もスマホ版変換は行う
             if "sp.netkeiba.com" in fallback_url:
                 fallback_url = fallback_url.replace("sp.netkeiba.com", "race.netkeiba.com")
-                
+            
             result_df, msg_fallback = try_fetch(fallback_url)
             
             if result_df is None:
-                st.error("❌ 取得失敗 (詳細は下記)")
-                with st.expander("🔍 診断ログ (見つかった列名一覧)"):
-                    st.write(f"▼ URL1: {target_url}")
-                    st.write(msg)
-                    st.write(f"▼ URL2 (Fallback): {fallback_url}")
-                    st.write(msg_fallback)
-                    st.info("もし 'Table X: [..., '馬番', ..., '予想オッズ', ...]' のような表示があれば、列名の判定ロジックを調整しますので教えてください。")
+                st.error("❌ オッズ情報の取得に失敗しました。")
+                st.info("💡 ヒント: netkeibaで失敗する場合は、Yahoo競馬の出馬表URLを試してみてください。")
+                with st.expander("🔍 詳細デバッグ情報"):
+                    st.write(f"試行1 ({target_url}): {msg}")
+                    st.write(f"試行2 ({fallback_url}): {msg_fallback}")
                 return None, "Failed"
         else:
-            st.error("❌ 取得失敗 (詳細は下記)")
-            with st.expander("🔍 診断ログ"):
-                st.write(f"URL: {target_url}")
-                st.write(msg)
+            st.error("❌ オッズ情報の取得に失敗しました。")
+            st.info("💡 ヒント: netkeibaで失敗する場合は、Yahoo競馬の出馬表URLを試してみてください。")
+            with st.expander("🔍 詳細デバッグ情報"):
+                st.write(f"試行 ({target_url}): {msg}")
             return None, "Failed"
             
+    # 成功時に警告メッセージがあればToast表示
+    if "NaN" in str(msg):
+        st.toast(msg, icon="⚠️")
+        
     return result_df, "Success"
 
 # ==========================================
