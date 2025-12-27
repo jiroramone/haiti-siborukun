@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-import openpyxl
+import requests
+from bs4 import BeautifulSoup
 
 # --- 1. 基本設定 ---
 st.set_page_config(page_title="配置馬券術 分析システム", layout="wide")
@@ -27,7 +28,7 @@ def load_data(file):
             try: df = pd.read_csv(file, encoding='utf-8')
             except: df = pd.read_csv(file, encoding='cp932')
         
-        # ヘッダー特定
+        # ヘッダー位置自動特定
         if not any(col in str(df.columns) for col in ['馬', '番', 'R', '騎']):
             for i in range(min(len(df), 10)):
                 if any(x in str(df.iloc[i].values) for x in ['馬', '番', 'R']):
@@ -42,49 +43,47 @@ def load_data(file):
         }
         df = df.rename(columns=name_map)
         
-        # 必須列確保
-        ensure_cols = ['R', '正番', '馬名', '騎手', '厩舎', '馬主', '場名', '単ｵｯｽﾞ', '着順']
-        for col in ensure_cols:
-            if col not in df.columns: df[col] = np.nan
-
-        # 数値化とクリーニング (ここを強化)
+        # 数値化
         df['R'] = pd.to_numeric(df['R'].apply(to_half_width), errors='coerce')
         df['正番'] = pd.to_numeric(df['正番'].apply(to_half_width), errors='coerce')
-        
-        # 必須データがない行は削除
         df = df.dropna(subset=['R', '正番'])
         df['R'] = df['R'].astype(int); df['正番'] = df['正番'].astype(int)
 
         for col in ['騎手', '厩舎', '馬主', '馬名', '場名']:
             if col in df.columns: df[col] = df[col].apply(normalize_name)
+            else: df[col] = '' # ない場合は空文字
         
-        # オッズの強制数値化（文字が入っていてもNaNにする）
-        df['単ｵｯｽﾞ'] = pd.to_numeric(df['単ｵｯｽﾞ'].apply(to_half_width), errors='coerce')
+        # オッズ列の確保（Excelにあればそれを使う）
+        if '単ｵｯｽﾞ' in df.columns:
+            df['単ｵｯｽﾞ'] = pd.to_numeric(df['単ｵｯｽﾞ'].apply(to_half_width), errors='coerce')
+        else:
+            df['単ｵｯｽﾞ'] = np.nan
         
         return df.copy(), "success"
     except Exception as e: return pd.DataFrame(), str(e)
 
-# --- 3. 配置計算エンジン (確実に判定) ---
+# --- 3. 配置計算エンジン (タグ追記方式・確実版) ---
 def analyze_haichi(df):
     df = df.copy()
     
     # 基礎数値計算
     max_umaban = df.groupby(['場名', 'R'])['正番'].transform('max')
     df['頭数'] = max_umaban.fillna(16).astype(int)
-    if '頭数' in df.columns and df['頭数'].notna().any():
+    # Excelに頭数があれば優先
+    if '頭数' in df.columns:
          df['頭数'] = pd.to_numeric(df['頭数'], errors='coerce').fillna(df['頭数']).astype(int)
          
     df['逆番'] = (df['頭数'] + 1) - df['正番']
     df['正循環'] = df['頭数'] + df['正番']
     df['逆循環'] = df['頭数'] + df['逆番']
 
-    # 結果格納用リスト
+    # 結果書き込み用の列を初期化 (リスト型で用意)
     df['タイプ_list'] = [[] for _ in range(len(df))]
     df['パターン_list'] = [[] for _ in range(len(df))]
     df['条件_list'] = [[] for _ in range(len(df))]
     df['スコア'] = 0.0
 
-    # 検索用辞書
+    # 高速検索用の辞書 (Key: 場名, R, 正番 -> Value: index)
     idx_map = {}
     for idx, row in df.iterrows():
         idx_map[(row['場名'], row['R'], row['正番'])] = idx
@@ -93,7 +92,7 @@ def analyze_haichi(df):
     blue_horses = [] 
     
     for col in ['騎手', '厩舎', '馬主']:
-        # データが空でないか確認
+        if col not in df.columns: continue
         if df[col].isna().all() or (df[col] == '').all(): continue
         
         group_keys = ['場名', col] if col == '騎手' else [col]
@@ -142,6 +141,7 @@ def analyze_haichi(df):
                         n_score += 2.0
                         is_reverse = True
                 
+                # 重複防止
                 if not any('青塗隣' in x for x in df.at[idx, 'タイプ_list']):
                     df.at[idx, 'タイプ_list'].append('△青塗隣' + ('(逆転)' if is_reverse else ''))
                     df.at[idx, 'パターン_list'].append('青隣')
@@ -151,7 +151,8 @@ def analyze_haichi(df):
     # --- C. ペア分析 ---
     pair_labels = list("ABCDEFGHIJKLMNOP")
     for col in ['騎手', '厩舎', '馬主']:
-        if df[col].isna().all(): continue
+        if col not in df.columns: continue
+        if df[col].isna().all() or (df[col] == '').all(): continue
         
         for name, group in df.groupby(['場名', col] if col=='騎手' else col):
             if len(group) < 2 or not name: continue
@@ -184,33 +185,52 @@ def analyze_haichi(df):
                             df.at[idx, '条件_list'].append(f"ペア({partner_R}R)")
                             df.at[idx, 'スコア'] += score_add
 
-    # 文字列変換
+    # リストを文字列に戻す
     df['タイプ'] = df['タイプ_list'].apply(lambda x: ' / '.join(x))
     df['パターン'] = df['パターン_list'].apply(lambda x: ','.join(x))
     df['条件'] = df['条件_list'].apply(lambda x: ' '.join(x))
     
     return df
 
-# --- 4. UI構成 ---
+# --- 4. Webオッズ取得 (今回は使用しませんが関数として残します) ---
+def fetch_odds(url):
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        resp.encoding = 'euc-jp'
+        soup = BeautifulSoup(resp.content, 'html.parser')
+        rows = soup.select('tr.HorseList')
+        data = []
+        for r in rows:
+            u = r.select_one('td[class*="Umaban"]')
+            o = r.select_one('td[class*="Popular"]')
+            if u:
+                u_n = u.get_text(strip=True)
+                o_v = re.sub(r'\(.*?\)', '', o.get_text(strip=True)) if o else 'nan'
+                try: dv = float(o_v)
+                except: dv = np.nan
+                data.append({'正番': int(u_n), '単ｵｯｽﾞ': dv})
+        return pd.DataFrame(data) if data else None
+    except: return None
+
+# --- 5. UI構成 ---
 st.title("🏇 配置馬券術 分析システム")
 
 with st.sidebar:
-    up_file = st.file_uploader("当日データをアップロード", type=['xlsx', 'csv'])
+    up_file = st.file_uploader("データファイルをアップロード", type=['xlsx', 'csv'])
     if 'analyzed_df' in st.session_state:
         csv = st.session_state['analyzed_df'].to_csv(index=False).encode('utf-8-sig')
-        st.download_button("💾 現在のデータを保存", csv, "race_result.csv")
+        st.download_button("💾 データ保存", csv, "race_result.csv")
 
 if up_file:
     df_raw, status = load_data(up_file)
     if status == "success":
-        # ★ここが重要: 読み込み直後に必ず分析を実行する
-        if 'analyzed_df' not in st.session_state:
-            with st.spinner('配置ロジック計算中...'):
-                st.session_state['analyzed_df'] = analyze_haichi(df_raw)
-
+        # ★アップロード直後に必ず分析を実行する
+        st.session_state['analyzed_df'] = analyze_haichi(df_raw)
+        
         full_df = st.session_state['analyzed_df']
         if full_df.empty:
-            st.error("有効なデータが読み込めませんでした。")
+            st.error("有効なデータがありませんでした。")
         else:
             places = sorted(full_df['場名'].unique())
             p_tabs = st.tabs(places)
@@ -223,8 +243,7 @@ if up_file:
                     for r_tab, r_num in zip(r_tabs, r_list):
                         with r_tab:
                             # データ表示
-                            disp_df = st.session_state['analyzed_df']
-                            disp_df = disp_df[(disp_df['場名']==place) & (disp_df['R']==r_num)].sort_values('正番')
+                            disp_df = full_df[(full_df['場名']==place) & (full_df['R']==r_num)].sort_values('正番')
                             
                             def highlight_row(row):
                                 styles = [''] * len(row)
