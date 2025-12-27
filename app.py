@@ -99,16 +99,12 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: 強力な再試行機能付きオッズ取得関数
+# ★修正: 「オッズ」という列名を確実に拾うように強化した関数
 def fetch_odds_from_web(url, force_mode=False):
-    """
-    指定されたURLからテーブルを読み込み、馬番と単勝オッズのペアを返す
-    odds.htmlで失敗したらshutuba.htmlを試す二段構え
-    """
     
-    # 内部関数: 1つのURLに対してスクレイピングを試みる
     def try_fetch(target_url):
         try:
+            # User-Agent偽装
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
@@ -119,38 +115,59 @@ def fetch_odds_from_web(url, force_mode=False):
             # HTML解析
             try:
                 dfs = pd.read_html(response.text, flavor='bs4')
-            except ImportError:
+            except:
                 try:
                     dfs = pd.read_html(response.text, flavor='html5lib')
-                except ImportError:
+                except:
                     dfs = pd.read_html(response.text)
             
-            if not dfs: return None
+            if not dfs: return None, "No tables found"
 
             target_df = None
-            for df in dfs:
-                cols = [str(c).replace(' ', '').replace('\n', '') for c in df.columns]
-                # マルチインデックス対応
+            debug_logs = []
+
+            for i, df in enumerate(dfs):
+                # カラム名の正規化（スペース・改行を完全削除）
+                cols = [str(c).replace(' ', '').replace('　', '').replace('\n', '').replace('\r', '') for c in df.columns]
+                
+                # マルチインデックスの結合処理
                 if isinstance(df.columns, pd.MultiIndex):
                     flat_cols = []
                     for c in df.columns:
-                        flat_cols.append(''.join([str(x) for x in c if 'Unnamed' not in str(x)]))
+                        # タプルの中身を結合
+                        col_str = ''.join([str(x) for x in c if 'Unnamed' not in str(x)])
+                        col_str = col_str.replace(' ', '').replace('　', '').replace('\n', '')
+                        flat_cols.append(col_str)
                     cols = flat_cols
                     df.columns = cols
+                
+                debug_logs.append(f"Table {i} Columns: {cols}")
 
-                # --- 列名の判定 ---
+                # --- 判定ロジック ---
                 has_umaban = any('馬番' in c for c in cols)
-                has_odds = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気', '予想'])
+                
+                # 単勝, オッズ, 人気 のいずれかがあれば候補にする
+                has_odds_related = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気'])
 
-                if has_umaban and has_odds:
+                if has_umaban and has_odds_related:
                     col_map = {}
                     for c, original_c in zip(cols, df.columns):
-                        if '馬番' in c: col_map[original_c] = '正番'
-                        elif '単勝' in c and 'オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
-                        elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
-                        elif '予想オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
-                        elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_c] = '単ｵｯｽﾞ'
+                        if '馬番' in c: 
+                            col_map[original_c] = '正番'
+                        
+                        # --- オッズ列の特定ロジック (優先順位順) ---
+                        # 1. 「単勝」が含まれる場合 (最強)
+                        elif '単勝' in c: 
+                            col_map[original_c] = '単ｵｯｽﾞ'
+                        # 2. 「オッズ」が含まれる場合 (出馬表の「予想オッズ」や「オッズ」に対応)
+                        elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): 
+                            col_map[original_c] = '単ｵｯｽﾞ'
+                        # 3. 「人気」しかない場合 (最終手段: 人気順をオッズ代わりにすることはできないが、テーブル特定のため)
+                        # ここではオッズ値が欲しいので、「人気」だけだとスキップするが、
+                        # もし「オッズ」列が見つからなくてもテーブルは特定したいならここで処理を追加できる。
+                        # 今回はオッズ必須とする。
                     
+                    # 必須列（馬番とオッズ）が揃っているか確認
                     if '正番' in col_map.values() and '単ｵｯｽﾞ' in col_map.values():
                         target_df = df.rename(columns=col_map)
                         break
@@ -160,41 +177,62 @@ def fetch_odds_from_web(url, force_mode=False):
                 res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
                 
                 def clean_odds(x):
-                    try: return float(x)
-                    except: return np.nan
+                    try: 
+                        # -- や 取消 を除外
+                        return float(x)
+                    except: 
+                        return np.nan
                 
                 res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
                 res = res.dropna(subset=['正番'])
                 
-                # オッズが全てNaNなら失敗とみなす (発売前で表はあるけど空の場合など)
+                # オッズが全てNaNなら失敗 (発売前など)
                 if res['単ｵｯｽﾞ'].isna().all():
-                    return None
+                    return None, "Columns found ('馬番' & 'オッズ') but all values are empty/NaN."
                     
-                return res
-            return None
+                return res, "Success"
             
-        except Exception:
-            return None
+            return None, debug_logs
+            
+        except Exception as e:
+            return None, str(e)
 
     # --- メイン処理 ---
-    # 1. まずodds.html (または入力されたURL) で試す
     target_url = url
-    if not force_mode and "race.netkeiba.com" in url and "shutuba.html" in url:
-        target_url = url.replace("shutuba.html", "odds.html")
     
-    result_df = try_fetch(target_url)
+    # URL自動変換 (force_modeがOFFの場合)
+    if not force_mode:
+        if "sp.netkeiba.com" in target_url:
+            target_url = target_url.replace("sp.netkeiba.com", "race.netkeiba.com")
+        if "race.netkeiba.com" in target_url and "shutuba.html" in target_url:
+            target_url = target_url.replace("shutuba.html", "odds.html")
     
-    # 2. 失敗したら、shutuba.html (元のURL) で再試行（フォールバック）
+    # 1. まずターゲットURLで試す
+    result_df, msg = try_fetch(target_url)
+    
+    # 2. 失敗時のフォールバック (元のURLで試す)
     if result_df is None or result_df.empty:
         if target_url != url:
-            st.warning("⚠️ オッズ専用ページからデータが取得できませんでした（発売前など）。出馬表ページ（予想オッズ）を確認します...")
-            result_df = try_fetch(url) # 元のURL(shutuba)でトライ
+            fallback_url = url
+            if "sp.netkeiba.com" in fallback_url:
+                fallback_url = fallback_url.replace("sp.netkeiba.com", "race.netkeiba.com")
+                
+            result_df, msg_fallback = try_fetch(fallback_url)
             
-    if result_df is not None and not result_df.empty:
-        return result_df
-    else:
-        st.error("❌ オッズ情報の取得に失敗しました。URLが正しいか、ページにオッズ表があるか確認してください。")
-        return None
+            if result_df is None:
+                st.error("❌ オッズ情報の取得に失敗しました。")
+                with st.expander("詳細デバッグ情報（解析された列名）"):
+                    st.write(f"試行1 ({target_url}): {msg}")
+                    st.write(f"試行2 ({fallback_url}): {msg_fallback}")
+                    st.info("ヒント: テーブル内に '馬番' と 'オッズ' (または単勝) という列名が見つかりませんでした。")
+                return None
+        else:
+            st.error("❌ オッズ情報の取得に失敗しました。")
+            with st.expander("詳細デバッグ情報（解析された列名）"):
+                st.write(f"試行 ({target_url}): {msg}")
+            return None
+            
+    return result_df
 
 # ==========================================
 # 2. 配置計算・分析ロジック
@@ -596,9 +634,9 @@ if uploaded_file:
                             r_tabs = st.tabs([f"{r}R" for r in race_list])
                             for r_tab, r_num in zip(r_tabs, race_list):
                                 with r_tab:
-                                    # オッズ取得ボタン
+                                    # --- オッズ取得機能 (デバッグ付き) ---
                                     with st.expander(f"🌐 {place}{r_num}R の最新オッズをWebから取得 (netkeiba)"):
-                                        st.caption("netkeibaのレースページURLを貼り付けてください（出馬表のURLでもOKです）")
+                                        st.caption("出馬表や結果ページのURLを貼り付けてください")
                                         
                                         col_url, col_force = st.columns([3, 1])
                                         with col_url:
@@ -608,7 +646,7 @@ if uploaded_file:
                                         
                                         if st.form_submit_button(f"📥 {place}{r_num}R オッズ取得・更新"):
                                             if url_input:
-                                                new_odds_df = fetch_odds_from_web(url_input, force_mode)
+                                                new_odds_df, debug_msg = fetch_odds_from_web(url_input, force_mode)
                                                 if new_odds_df is not None:
                                                     target_mask = (st.session_state['analyzed_df']['場名'] == place) & \
                                                                   (st.session_state['analyzed_df']['R'] == r_num)
@@ -621,6 +659,8 @@ if uploaded_file:
                                                     
                                                     st.success(f"{place}{r_num}R のオッズを更新しました！")
                                                     st.rerun()
+                                                else:
+                                                    pass # エラーメッセージはfetch関数内で表示済み
                                                 
                                     race_data = place_df[place_df['R'] == r_num][valid_cols := [c for c in display_cols if c in full_df.columns]]
                                     edited_chunk = st.data_editor(
