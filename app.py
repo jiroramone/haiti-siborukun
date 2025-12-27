@@ -57,6 +57,7 @@ def load_data(file):
 
     # データ整形
     df.columns = df.columns.str.strip()
+    # ★重要: ここでExcelの「単オッズ」を内部用の「単ｵｯｽﾞ」に変換しています
     rename_map = {
         '場所': '場名', '開催': '場名', 
         '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎',
@@ -99,25 +100,24 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: 生データ表示機能を追加したオッズ取得関数
+# ★修正: サイトの「オッズ」を「単ｵｯｽﾞ」に確実に変換する関数
 def fetch_odds_from_web(url, force_mode=False):
     
     def try_fetch(target_url):
         try:
-            # User-Agent偽装
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
             response = requests.get(target_url, headers=headers, timeout=15)
             response.raise_for_status()
             
-            # 文字コード強制
+            # 文字コード設定
             if "netkeiba" in target_url:
                 response.encoding = 'euc-jp'
             else:
                 response.encoding = response.apparent_encoding
 
-            # HTML解析 (パーサー総当たり)
+            # HTML解析
             dfs = []
             for parser in ['bs4', 'lxml', 'html5lib']:
                 try:
@@ -128,18 +128,10 @@ def fetch_odds_from_web(url, force_mode=False):
             if not dfs: return None, "No tables found"
 
             target_df = None
-            
-            # --- デバッグ表示用: 取得したテーブルの中身を全部見せる ---
-            with st.expander("🛠 生データ確認 (デバッグ)"):
-                st.write(f"URL: {target_url}")
-                st.write(f"見つかったテーブル数: {len(dfs)}")
-                for i, d in enumerate(dfs):
-                    st.write(f"### Table {i}")
-                    st.write(f"列名: {list(d.columns)}")
-                    st.dataframe(d.head(5)) # 最初の5行だけ表示
+            debug_logs = []
 
             for i, df in enumerate(dfs):
-                # カラム名の正規化 (MultiIndex対応)
+                # カラム名の正規化
                 cols = []
                 for c in df.columns:
                     if isinstance(c, tuple):
@@ -149,6 +141,8 @@ def fetch_odds_from_web(url, force_mode=False):
                     col_str = col_str.replace(' ', '').replace('　', '').replace('\n', '').replace('\r', '')
                     cols.append(col_str)
                 
+                debug_logs.append(f"Table {i}: {cols}")
+
                 # --- 判定ロジック ---
                 has_umaban = any('馬番' in c for c in cols)
                 has_odds_related = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気', '予想'])
@@ -159,40 +153,38 @@ def fetch_odds_from_web(url, force_mode=False):
                         if '馬番' in clean_col: 
                             col_map[original_col] = '正番'
                         
-                        # オッズ列の特定 (優先順位: 単勝 > 予想オッズ > オッズ > 人気)
+                        # ★ここ修正: サイト上の色々な名前を、アプリ内の「単ｵｯｽﾞ」に統一
                         elif '単勝' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
                         elif '予想オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
-                        elif 'オッズ' in clean_col and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_col] = '単ｵｯｽﾞ'
+                        elif 'オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ' # 「オッズ」があれば「単ｵｯｽﾞ」へ
                         
-                        # 人気列も確保しておく (オッズがない場合の最終手段)
                         elif '人気' in clean_col: col_map[original_col] = '人気_temp'
 
                     if '正番' in col_map.values():
-                        # オッズ列が特定できなかった場合、人気列を代用として扱うか判断
-                        if '単ｵｯｽﾞ' not in col_map.values() and '人気_temp' in col_map.values():
-                             # キーを書き換える
-                             for k, v in col_map.items():
-                                 if v == '人気_temp':
-                                     col_map[k] = '単ｵｯｽﾞ'
-                                     break
+                        if '単ｵｯｽﾞ' not in col_map.values():
+                            # もしオッズがなく人気しかなければ、人気をオッズ列として一旦読む（後で数値チェック）
+                            for k, v in col_map.items():
+                                if v == '人気_temp':
+                                    col_map[k] = '単ｵｯｽﾞ'
+                                    break
                         
                         if '単ｵｯｽﾞ' in col_map.values():
                             target_df = df.rename(columns=col_map)
                             break
             
             if target_df is not None:
+                # 必要な列だけ抽出
                 res = target_df[['正番', '単ｵｯｽﾞ']].copy()
-                # 数値変換 (エラー無視)
+                
+                # 正番のクリーニング
                 res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
                 
+                # オッズのクリーニング
                 def clean_odds(x):
-                    # 文字列にして余計なものを消す
                     s = str(x).strip()
-                    # 「取消」「--」などを除外
                     if s in ['--', '---', '取消', '除外', 'nan', 'NaN']:
                         return np.nan
-                    # カッコ書きなどを消す (例: "4.5(2)")
-                    s = re.sub(r'\(.*?\)', '', s)
+                    s = re.sub(r'\(.*?\)', '', s) # カッコ書き削除
                     try: 
                         return float(s)
                     except: 
@@ -201,14 +193,13 @@ def fetch_odds_from_web(url, force_mode=False):
                 res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
                 res = res.dropna(subset=['正番'])
                 
-                # オッズが全てNaNなら警告 (でもデータは返す)
                 if res['単ｵｯｽﾞ'].isna().all():
-                    st.warning("⚠️ テーブルは見つかりましたが、オッズの数値変換に失敗しました（データが '--' などの可能性があります）。馬番のみ読み込みます。")
-                    return res, "NaN Warning"
+                    st.toast("⚠️ 数値データが見つかりませんでした。馬番のみ読み込みます。", icon="ℹ️")
+                    return res, "Columns found but all odds are NaN (Loaded anyway)"
                     
                 return res, "Success"
             
-            return None, "No valid table structure found"
+            return None, debug_logs
             
         except Exception as e:
             return None, str(e)
@@ -224,7 +215,6 @@ def fetch_odds_from_web(url, force_mode=False):
     result_df, msg = try_fetch(target_url)
     
     if result_df is None or result_df.empty:
-        # フォールバック処理
         if target_url != url:
             fallback_url = url
             if "sp.netkeiba.com" in fallback_url:
@@ -234,11 +224,14 @@ def fetch_odds_from_web(url, force_mode=False):
             
             if result_df is None:
                 st.error("❌ オッズ情報の取得に失敗しました。")
-                st.write("詳細ログ:", msg_fallback)
+                with st.expander("🔍 詳細デバッグ情報"):
+                    st.write(f"試行1 ({target_url}): {msg}")
+                    st.write(f"試行2 ({fallback_url}): {msg_fallback}")
                 return None, "Failed"
         else:
             st.error("❌ オッズ情報の取得に失敗しました。")
-            st.write("詳細ログ:", msg)
+            with st.expander("🔍 詳細デバッグ情報"):
+                st.write(f"試行 ({target_url}): {msg}")
             return None, "Failed"
             
     return result_df, "Success"
