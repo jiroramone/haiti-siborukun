@@ -99,18 +99,19 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: 文字コードEUC-JP強制指定版のオッズ取得関数
+# ★修正: 戻り値をタプル (df, msg) に統一したオッズ取得関数
 def fetch_odds_from_web(url, force_mode=False):
     
     def try_fetch(target_url):
         try:
+            # User-Agent偽装
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
             response = requests.get(target_url, headers=headers, timeout=10)
             response.raise_for_status()
             
-            # ★ここが重要: netkeibaはEUC-JPなので強制指定する
+            # 文字コード設定 (netkeibaならEUC-JP)
             if "netkeiba" in target_url:
                 response.encoding = 'euc-jp'
             else:
@@ -125,14 +126,13 @@ def fetch_odds_from_web(url, force_mode=False):
                 except:
                     dfs = pd.read_html(response.text)
             
-            if not dfs: return None, "No tables found"
+            if not dfs: return None, "No tables found in page"
 
             target_df = None
             debug_logs = []
 
             for i, df in enumerate(dfs):
-                # カラム名の正規化
-                cols = [str(c).replace(' ', '').replace('　', '').replace('\n', '') for c in df.columns]
+                cols = [str(c).replace(' ', '').replace('　', '').replace('\n', '').replace('\r', '') for c in df.columns]
                 
                 if isinstance(df.columns, pd.MultiIndex):
                     flat_cols = []
@@ -143,32 +143,26 @@ def fetch_odds_from_web(url, force_mode=False):
                     cols = flat_cols
                     df.columns = cols
                 
-                debug_logs.append(f"Table {i}: {cols}")
+                debug_logs.append(f"Table {i} Columns: {cols}")
 
-                # --- 判定ロジック ---
                 has_umaban = any('馬番' in c for c in cols)
-                
-                if has_umaban:
+                has_odds_related = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気', '予想'])
+
+                if has_umaban and has_odds_related:
                     col_map = {}
                     for c, original_c in zip(cols, df.columns):
                         if '馬番' in c: 
                             col_map[original_c] = '正番'
                         
-                        # オッズ列の特定
                         elif '単勝' in c: col_map[original_c] = '単ｵｯｽﾞ'
                         elif '予想オッズ' in c: col_map[original_c] = '単ｵｯｽﾞ'
                         elif 'オッズ' in c and '単ｵｯｽﾞ' not in col_map.values(): col_map[original_c] = '単ｵｯｽﾞ'
                         elif '人気' in c and '単ｵｯｽﾞ' not in col_map.values(): 
-                            # 人気しかない場合、オッズの代わりにはならないが、テーブル特定のために保持
                             pass 
 
-                    # 必須列確認
                     if '正番' in col_map.values():
-                        # オッズ列が見つからなかった場合の最終手段
                         if '単ｵｯｽﾞ' not in col_map.values():
-                            # 「人気」列があればそれをオッズ列とみなす（数値が入っていれば動く）
-                            # もし「人気」もなければ、馬番の隣などの列を推測するロジックが必要だが、
-                            # netkeibaなら必ず「オッズ」か「人気」はあるはず。
+                            # 最後の手段：人気があればそれをオッズ列とみなす（強引だが構造解析のため）
                             for c, original_c in zip(cols, df.columns):
                                 if '人気' in c:
                                     col_map[original_c] = '単ｵｯｽﾞ'
@@ -183,10 +177,8 @@ def fetch_odds_from_web(url, force_mode=False):
                 res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
                 
                 def clean_odds(x):
-                    try: 
-                        return float(x)
-                    except: 
-                        return np.nan
+                    try: return float(x)
+                    except: return np.nan
                 
                 res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
                 res = res.dropna(subset=['正番'])
@@ -209,11 +201,10 @@ def fetch_odds_from_web(url, force_mode=False):
         if "race.netkeiba.com" in target_url and "shutuba.html" in target_url:
             target_url = target_url.replace("shutuba.html", "odds.html")
     
-    # 1. まずターゲットURLで試す
     result_df, msg = try_fetch(target_url)
     
-    # 2. 失敗時のフォールバック
     if result_df is None or result_df.empty:
+        # フォールバック処理
         if target_url != url:
             fallback_url = url
             if "sp.netkeiba.com" in fallback_url:
@@ -223,23 +214,17 @@ def fetch_odds_from_web(url, force_mode=False):
             
             if result_df is None:
                 st.error("❌ オッズ情報の取得に失敗しました。")
-                with st.expander("🔍 詳細デバッグ情報（文字化けしていませんか？）"):
-                    st.write("▼ 試行1 (自動変換先) の結果")
-                    st.write(f"URL: {target_url}")
-                    st.write(msg)
-                    st.write("---")
-                    st.write("▼ 試行2 (元のURL) の結果")
-                    st.write(f"URL: {fallback_url}")
-                    st.write(msg_fallback)
-                return None
+                with st.expander("🔍 詳細デバッグ情報"):
+                    st.write(f"試行1 ({target_url}): {msg}")
+                    st.write(f"試行2 ({fallback_url}): {msg_fallback}")
+                return None, "Failed at fallback" # ★ここを修正 (None, str) を返す
         else:
             st.error("❌ オッズ情報の取得に失敗しました。")
             with st.expander("🔍 詳細デバッグ情報"):
-                st.write(f"URL: {target_url}")
-                st.write(msg)
-            return None
+                st.write(f"試行 ({target_url}): {msg}")
+            return None, "Failed at primary" # ★ここを修正 (None, str) を返す
             
-    return result_df
+    return result_df, "Success"
 
 # ==========================================
 # 2. 配置計算・分析ロジック
