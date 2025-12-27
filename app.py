@@ -18,7 +18,7 @@ def normalize_name(x):
     if pd.isna(x): return ''
     return re.sub(r'[★☆▲△◇]', '', str(x).strip().replace('　', '').replace(' ', ''))
 
-# --- 2. データ読み込み ---
+# --- 2. データ読み込み（安全装置付き） ---
 @st.cache_data
 def load_data(file):
     try:
@@ -28,74 +28,78 @@ def load_data(file):
             try: df = pd.read_csv(file, encoding='utf-8')
             except: df = pd.read_csv(file, encoding='cp932')
         
-        # ヘッダー特定
+        # ヘッダー特定（「馬」や「番」がある行を探す）
         if not any(col in str(df.columns) for col in ['馬', '番', 'R', '騎']):
             for i in range(min(len(df), 10)):
                 if any(x in str(df.iloc[i].values) for x in ['馬', '番', 'R']):
-                    df.columns = df.iloc[i]; df = df.iloc[i+1:].reset_index(drop=True); break
+                    df.columns = df.iloc[i]
+                    df = df.iloc[i+1:].reset_index(drop=True)
+                    break
 
         df.columns = df.columns.astype(str).str.strip()
         name_map = {
             '場所': '場名', '開催': '場名', '競馬場': '場名',
             '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎',
             '騎手名': '騎手', 'レース': 'R', '番': '正番', '馬番': '正番',
-            '単オッズ': '単ｵｯｽﾞ', '単勝オッズ': '単ｵｯｽﾞ', 'オッズ': '単ｵｯｽﾞ'
+            '単オッズ': '単ｵｯｽﾞ', '単勝オッズ': '単ｵｯｽﾞ', 'オッズ': '単ｵｯｽﾞ', '単勝': '単ｵｯｽﾞ'
         }
         df = df.rename(columns=name_map)
         
+        # ★ここが修正点: 必須列がなくても空で作る（エラー回避）
+        ensure_cols = ['R', '正番', '馬名', '騎手', '厩舎', '馬主', '場名', '単ｵｯｽﾞ']
+        for col in ensure_cols:
+            if col not in df.columns:
+                df[col] = np.nan # ない場合は空っぽで作成
+
         # 数値化
         df['R'] = pd.to_numeric(df['R'].apply(to_half_width), errors='coerce')
         df['正番'] = pd.to_numeric(df['正番'].apply(to_half_width), errors='coerce')
-        df = df.dropna(subset=['R', '正番'])
-        df['R'] = df['R'].astype(int); df['正番'] = df['正番'].astype(int)
-
-        for col in ['騎手', '厩舎', '馬主', '馬名', '場名']:
-            if col in df.columns: df[col] = df[col].apply(normalize_name)
         
-        if '単ｵｯｽﾞ' in df.columns:
-            df['単ｵｯｽﾞ'] = pd.to_numeric(df['単ｵｯｽﾞ'].apply(to_half_width), errors='coerce')
-        else:
-            df['単ｵｯｽﾞ'] = np.nan
+        # 必須データがない行は削除
+        df = df.dropna(subset=['R', '正番'])
+        df['R'] = df['R'].astype(int)
+        df['正番'] = df['正番'].astype(int)
+
+        # 文字列の正規化
+        for col in ['騎手', '厩舎', '馬主', '馬名', '場名']:
+            df[col] = df[col].apply(normalize_name)
+        
+        df['単ｵｯｽﾞ'] = pd.to_numeric(df['単ｵｯｽﾞ'].apply(to_half_width), errors='coerce')
         
         return df.copy(), "success"
     except Exception as e: return pd.DataFrame(), str(e)
 
-# --- 3. 配置計算エンジン (青塗・隣・ペア 完全版) ---
+# --- 3. 配置計算エンジン ---
 def analyze_haichi(df):
     df = df.copy()
     
     # 基礎数値計算
     max_umaban = df.groupby(['場名', 'R'])['正番'].transform('max')
     df['頭数'] = max_umaban.fillna(16).astype(int)
-    if '頭数' in df.columns: # Excelに頭数があれば優先
+    if '頭数' in df.columns and df['頭数'].notna().any():
          df['頭数'] = pd.to_numeric(df['頭数'], errors='coerce').fillna(df['頭数']).astype(int)
          
     df['逆番'] = (df['頭数'] + 1) - df['正番']
     df['正循環'] = df['頭数'] + df['正番']
     df['逆循環'] = df['頭数'] + df['逆番']
 
-    # 結果格納用リスト（ここに該当データを積んでいく）
-    # 初期状態として全データを入れる
-    results = df.to_dict('records')
-    for r in results:
-        r['タイプ'] = []
-        r['パターン'] = []
-        r['条件'] = []
-        r['スコア'] = 0.0
+    # 結果格納用（初期化）
+    df['タイプ'] = ''
+    df['パターン'] = ''
+    df['条件'] = ''
+    df['スコア'] = 0.0
 
-    # 検索用辞書作成
+    # 検索高速化用
     res_map = {}
-    for r in results:
-        res_map[(r['場名'], r['R'], r['正番'])] = r
+    for idx, row in df.iterrows():
+        res_map[(row['場名'], row['R'], row['正番'])] = idx
 
-    # --- A. 青塗分析 (Logic A) ---
-    blue_horses = [] # (場名, R, 正番, 属性名, オッズ)
-    
+    # --- A. 青塗分析 ---
+    blue_list = [] # 隣判定用
     for col in ['騎手', '厩舎', '馬主']:
-        if col not in df.columns: continue
-        group_keys = ['場名', col] if col == '騎手' else [col]
+        if df[col].isna().all() or (df[col] == '').all(): continue # データがない列はスキップ
         
-        # グループごとに共通値を探索
+        group_keys = ['場名', col] if col == '騎手' else [col]
         for name, group in df.groupby(group_keys):
             if len(group) < 2 or not name: continue
             
@@ -108,51 +112,47 @@ def analyze_haichi(df):
             if common:
                 priority = 1.0 if col == '騎手' else 0.2
                 c_text = ','.join(map(str, sorted(list(common))))
-                
                 for _, row in group.iterrows():
-                    key = (row['場名'], row['R'], row['正番'])
-                    if key in res_map:
-                        res_map[key]['タイプ'].append(f'★{col}青塗')
-                        res_map[key]['パターン'].append('青')
-                        res_map[key]['条件'].append(f'共通({c_text})')
-                        res_map[key]['スコア'] += 9.0 + priority
-                        
-                        # 青塗リストに追加（隣の判定用）
-                        blue_horses.append({
-                            '場名': row['場名'], 'R': row['R'], '正番': row['正番'],
-                            '属性': f"{col}:{name}", '単ｵｯｽﾞ': row.get('単ｵｯｽﾞ')
-                        })
+                    idx = row.name
+                    df.at[idx, 'タイプ'] += f'★{col}青塗 '
+                    df.at[idx, 'パターン'] += '青,'
+                    df.at[idx, '条件'] += f'共通({c_text}) '
+                    df.at[idx, 'スコア'] += 9.0 + priority
+                    
+                    blue_list.append({
+                        '場名': row['場名'], 'R': row['R'], '正番': row['正番'],
+                        '属性': f"{col}:{name}", '単ｵｯｽﾞ': row['単ｵｯｽﾞ']
+                    })
 
-    # --- B. 青塗の隣 (Logic B) ---
-    for b in blue_horses:
-        # 隣の馬番 (±1)
-        for target_num in [b['正番'] - 1, b['正番'] + 1]:
-            key = (b['場名'], b['R'], target_num)
+    # --- B. 青塗の隣 ---
+    for b in blue_list:
+        for t_num in [b['正番']-1, b['正番']+1]:
+            key = (b['場名'], b['R'], t_num)
             if key in res_map:
-                target = res_map[key]
-                # 自分自身が青塗でない、または別の青塗である場合も隣として評価
+                idx = res_map[key]
                 
                 n_score = 9.0
+                is_reverse = False
                 # オッズ逆転チェック
                 b_odds = b['単ｵｯｽﾞ']
-                t_odds = target.get('単ｵｯｽﾞ')
+                t_odds = df.at[idx, '単ｵｯｽﾞ']
                 
-                # オッズがあり、かつ 隣(target) < 青(blue) なら逆転加点
-                is_reverse = False
                 if pd.notna(b_odds) and pd.notna(t_odds):
                     if t_odds < b_odds:
                         n_score += 2.0
                         is_reverse = True
                 
-                target['タイプ'].append('△青塗隣' + ('(逆転)' if is_reverse else ''))
-                target['パターン'].append('青隣')
-                target['条件'].append(f"#{b['正番']}({b['属性']})の隣")
-                target['スコア'] += n_score
+                if '青塗隣' not in df.at[idx, 'タイプ']: # 重複追加を防ぐ
+                    df.at[idx, 'タイプ'] += '△青塗隣' + ('(逆転) ' if is_reverse else ' ')
+                    df.at[idx, 'パターン'] += '青隣,'
+                    df.at[idx, '条件'] += f"#{b['正番']}の隣 "
+                    df.at[idx, 'スコア'] += n_score
 
-    # --- C. ペア分析 (Logic C) ---
+    # --- C. ペア分析 ---
     pair_labels = list("ABCDEFGHIJKLMNOP")
     for col in ['騎手', '厩舎', '馬主']:
-        if col not in df.columns: continue
+        if df[col].isna().all() or (df[col] == '').all(): continue
+        
         for name, group in df.groupby(['場名', col] if col=='騎手' else col):
             if len(group) < 2 or not name: continue
             sorted_rows = group.sort_values('R').to_dict('records')
@@ -161,7 +161,6 @@ def analyze_haichi(df):
                 r1 = sorted_rows[i]
                 r2 = sorted_rows[i+1]
                 
-                # 4つの数字の総当たり一致確認
                 v1 = [r1[c] for c in ['正番', '逆番', '正循環', '逆循環']]
                 v2 = [r2[c] for c in ['正番', '逆番', '正循環', '逆循環']]
                 
@@ -172,42 +171,30 @@ def analyze_haichi(df):
                             pats.append(pair_labels[x*4+y])
                 
                 if pats:
-                    p_str = ",".join(pats)
+                    p_str = "".join(pats)
                     is_chance = any(x in pats for x in ['C','D','G','H'])
-                    type_str = '◎チャンス' if is_chance else '○狙い目'
+                    type_str = '◎チャンス ' if is_chance else '○狙い目 '
                     score_add = 4.0 if is_chance else 3.0
                     
-                    # R1への書き込み
-                    k1 = (r1['場名'], r1['R'], r1['正番'])
-                    if k1 in res_map:
-                        res_map[k1]['タイプ'].append(type_str)
-                        res_map[k1]['パターン'].append(p_str)
-                        res_map[k1]['条件'].append(f"ペア({r2['R']}R)")
-                        res_map[k1]['スコア'] += score_add
-                        
-                    # R2への書き込み
-                    k2 = (r2['場名'], r2['R'], r2['正番'])
-                    if k2 in res_map:
-                        res_map[k2]['タイプ'].append(type_str)
-                        res_map[k2]['パターン'].append(p_str)
-                        res_map[k2]['条件'].append(f"ペア({r1['R']}R)")
-                        res_map[k2]['スコア'] += score_add
+                    # 書き込み
+                    for r_data in [r1, r2]:
+                        k = (r_data['場名'], r_data['R'], r_data['正番'])
+                        if k in res_map:
+                            idx = res_map[k]
+                            df.at[idx, 'タイプ'] += type_str
+                            df.at[idx, 'パターン'] += p_str + ","
+                            target_R = r2['R'] if r_data['R'] == r1['R'] else r1['R']
+                            df.at[idx, '条件'] += f"ペア({target_R}R) "
+                            df.at[idx, 'スコア'] += score_add
 
-    # 結果をDataFrameに戻す
-    final_df = pd.DataFrame(list(res_map.values()))
-    
-    # リストを文字列に変換して見やすく
-    for c in ['タイプ', 'パターン', '条件']:
-        final_df[c] = final_df[c].apply(lambda x: ' / '.join(sorted(set(x), key=x.index)) if x else '')
-    
-    return final_df
+    return df
 
 # --- 4. Webオッズ取得 ---
 def fetch_odds(url):
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         resp = requests.get(url, headers=headers, timeout=10)
-        resp.encoding = 'euc-jp' # netkeiba specific
+        resp.encoding = 'euc-jp'
         soup = BeautifulSoup(resp.content, 'html.parser')
         rows = soup.select('tr.HorseList')
         data = []
@@ -240,51 +227,62 @@ if up_file:
             st.session_state['analyzed_df'] = analyze_haichi(df_raw)
 
         full_df = st.session_state['analyzed_df']
-        places = sorted(full_df['場名'].unique())
-        p_tabs = st.tabs(places)
-        
-        for p_tab, place in zip(p_tabs, places):
-            with p_tab:
-                p_df = full_df[full_df['場名'] == place]
-                r_list = sorted(p_df['R'].unique())
-                r_tabs = st.tabs([f"{r}R" for r in r_list])
-                for r_tab, r_num in zip(r_tabs, r_list):
-                    with r_tab:
-                        # オッズ更新
-                        with st.expander("🌐 ネット競馬から最新オッズを取得"):
-                            u_in = st.text_input("URLを貼り付け", key=f"u_{place}_{r_num}")
-                            if st.button("オッズ更新実行", key=f"b_{place}_{r_num}"):
-                                new_o = fetch_odds(u_in)
-                                if new_o is not None:
-                                    # データフレームを更新
-                                    curr_df = st.session_state['analyzed_df']
-                                    for _, row in new_o.iterrows():
-                                        mask = (curr_df['場名']==place) & (curr_df['R']==r_num) & (curr_df['正番']==row['正番'])
-                                        curr_df.loc[mask, '単ｵｯｽﾞ'] = row['単ｵｯｽﾞ']
-                                    
-                                    # ★重要: オッズ更新後に再分析を実行（青塗隣の逆転判定などのため）
-                                    st.session_state['analyzed_df'] = analyze_haichi(curr_df)
-                                    st.success("更新完了！再計算しました。")
-                                    st.rerun()
-                                else:
-                                    st.error("取得失敗。URLを確認してください。")
+        if full_df.empty:
+            st.error("有効なデータがありませんでした。")
+        else:
+            places = sorted(full_df['場名'].unique())
+            p_tabs = st.tabs(places)
+            
+            for p_tab, place in zip(p_tabs, places):
+                with p_tab:
+                    p_df = full_df[full_df['場名'] == place]
+                    r_list = sorted(p_df['R'].unique())
+                    r_tabs = st.tabs([f"{r}R" for r in r_list])
+                    for r_tab, r_num in zip(r_tabs, r_list):
+                        with r_tab:
+                            # オッズ更新
+                            with st.expander("🌐 ネット競馬から最新オッズを取得"):
+                                u_in = st.text_input("URLを貼り付け", key=f"u_{place}_{r_num}")
+                                if st.button("オッズ更新実行", key=f"b_{place}_{r_num}"):
+                                    new_o = fetch_odds(u_in)
+                                    if new_o is not None:
+                                        # データフレームを更新
+                                        curr_df = st.session_state['analyzed_df']
+                                        for _, row in new_o.iterrows():
+                                            mask = (curr_df['場名']==place) & (curr_df['R']==r_num) & (curr_df['正番']==row['正番'])
+                                            curr_df.loc[mask, '単ｵｯｽﾞ'] = row['単ｵｯｽﾞ']
+                                        
+                                        # 再分析
+                                        st.session_state['analyzed_df'] = analyze_haichi(curr_df)
+                                        st.success("更新完了！再計算しました。")
+                                        st.rerun()
+                                    else:
+                                        st.error("取得失敗。URLを確認してください。")
 
-                        # データ表示（全頭表示 + スコア順ではない、馬番順）
-                        disp_df = st.session_state['analyzed_df']
-                        disp_df = disp_df[(disp_df['場名']==place) & (disp_df['R']==r_num)].sort_values('正番')
-                        
-                        # ハイライト機能
-                        def highlight_row(row):
-                            styles = [''] * len(row)
-                            if row['スコア'] >= 10: # 高得点
-                                return ['background-color: #ffcccc'] * len(row)
-                            elif '青' in str(row['タイプ']): # 青塗関連
-                                return ['background-color: #e6f3ff'] * len(row)
-                            return styles
+                            # データ表示
+                            disp_df = st.session_state['analyzed_df']
+                            disp_df = disp_df[(disp_df['場名']==place) & (disp_df['R']==r_num)].sort_values('正番')
+                            
+                            # ハイライト機能
+                            def highlight_row(row):
+                                styles = [''] * len(row)
+                                score = row.get('スコア', 0)
+                                type_str = str(row.get('タイプ', ''))
+                                
+                                if score >= 10: 
+                                    return ['background-color: #ffcccc'] * len(row)
+                                elif '青' in type_str: 
+                                    return ['background-color: #e6f3ff'] * len(row)
+                                return styles
 
-                        st.dataframe(
-                            disp_df[['正番', '馬名', '騎手', '単ｵｯｽﾞ', 'タイプ', 'パターン', '条件', 'スコア']]
-                            .style.apply(highlight_row, axis=1),
-                            use_container_width=True,
-                            hide_index=True
-                        )
+                            # ★ここが重要: 確実に存在する列だけを表示する
+                            # まずデフォルトの表示列を定義
+                            cols_to_show = ['正番', '馬名', '騎手', '単ｵｯｽﾞ', 'タイプ', 'パターン', '条件', 'スコア']
+                            # 実際にDataFrameにある列だけに絞り込む（KeyError回避）
+                            final_cols = [c for c in cols_to_show if c in disp_df.columns]
+
+                            st.dataframe(
+                                disp_df[final_cols].style.apply(highlight_row, axis=1),
+                                use_container_width=True,
+                                hide_index=True
+                            )
