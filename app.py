@@ -99,7 +99,7 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: クラッシュ防止の安全装置を追加したオッズ取得関数
+# ★修正: 列名のフラット化を行い、KeyErrorを完全に防ぐ関数
 def fetch_odds_from_web(url, force_mode=False):
     
     def try_fetch(target_url):
@@ -111,13 +111,11 @@ def fetch_odds_from_web(url, force_mode=False):
             response = requests.get(target_url, headers=headers, timeout=15)
             response.raise_for_status()
             
-            # 文字コード設定
             if "netkeiba" in target_url:
                 response.encoding = 'euc-jp'
             else:
                 response.encoding = response.apparent_encoding
 
-            # HTML解析
             dfs = []
             for parser in ['bs4', 'lxml', 'html5lib']:
                 try:
@@ -131,58 +129,59 @@ def fetch_odds_from_web(url, force_mode=False):
             debug_logs = []
 
             for i, df in enumerate(dfs):
-                # カラム名の正規化
-                cols = []
+                # ★重要: 列名の強制フラット化 (MultiIndex解消)
+                # これにより、df.columns は必ず単純な文字列のリストになります
+                flat_cols = []
                 for c in df.columns:
                     if isinstance(c, tuple):
+                        # タプルの中身を結合し、ゴミを除去
                         col_str = ''.join([str(x) for x in c if 'Unnamed' not in str(x)])
                     else:
                         col_str = str(c)
+                    # スペースや改行を削除
                     col_str = col_str.replace(' ', '').replace('　', '').replace('\n', '').replace('\r', '')
-                    cols.append(col_str)
+                    flat_cols.append(col_str)
                 
-                debug_logs.append(f"Table {i}: {cols}")
+                # データフレームの列名を上書き
+                df.columns = flat_cols
+                
+                debug_logs.append(f"Table {i} Cols: {flat_cols}")
 
                 # --- 判定ロジック ---
-                has_umaban = any('馬番' in c for c in cols)
-                has_odds_related = any(x in c for c in cols for x in ['単勝', 'オッズ', '人気', '予想'])
+                has_umaban = any('馬番' in c for c in flat_cols)
+                has_odds_related = any(x in c for c in flat_cols for x in ['単勝', 'オッズ', '人気', '予想'])
 
                 if has_umaban and has_odds_related:
-                    col_map = {}
-                    for original_col, clean_col in zip(df.columns, cols):
-                        if '馬番' in clean_col: 
-                            col_map[original_col] = '正番'
+                    # rename用のマッピング辞書作成
+                    # ここではもう列名は単純な文字列になっているので、KeyErrorは起きない
+                    rename_dict = {}
+                    
+                    for col_name in flat_cols:
+                        if '馬番' in col_name:
+                            rename_dict[col_name] = '正番'
                         
-                        elif '単勝' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
-                        elif '予想オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
-                        elif 'オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
-                        elif '人気' in clean_col: col_map[original_col] = '人気_temp'
+                        elif '単勝' in col_name: rename_dict[col_name] = '単ｵｯｽﾞ'
+                        elif '予想オッズ' in col_name: rename_dict[col_name] = '単ｵｯｽﾞ'
+                        elif 'オッズ' in col_name and '単ｵｯｽﾞ' not in rename_dict.values(): rename_dict[col_name] = '単ｵｯｽﾞ'
+                        elif '人気' in col_name: rename_dict[col_name] = '人気_temp'
 
-                    if '正番' in col_map.values():
-                        if '単ｵｯｽﾞ' not in col_map.values():
-                            # 人気があればそれをオッズ列として代用
-                            for k, v in col_map.items():
-                                if v == '人気_temp':
-                                    col_map[k] = '単ｵｯｽﾞ'
-                                    break
+                    # リネーム実行
+                    df = df.rename(columns=rename_dict)
+
+                    # 必須列があるか確認
+                    if '正番' in df.columns:
+                        # オッズ列がない場合、人気列で代用を試みる
+                        if '単ｵｯｽﾞ' not in df.columns and '人気_temp' in df.columns:
+                            df = df.rename(columns={'人気_temp': '単ｵｯｽﾞ'})
                         
-                        if '単ｵｯｽﾞ' in col_map.values():
-                            target_df = df.rename(columns=col_map)
+                        if '単ｵｯｽﾞ' in df.columns:
+                            target_df = df
                             break
             
             if target_df is not None:
-                # ★重要: クラッシュ防止（列が存在するか確認し、なければ作る）
-                if '正番' not in target_df.columns:
-                    return None, "Rename failed for '正番'"
-                
-                if '単ｵｯｽﾞ' not in target_df.columns:
-                    # ここで強制的に列を作る
-                    target_df['単ｵｯｽﾞ'] = np.nan
-                
-                # 必要な列だけ抽出 (copyしてスライス)
+                # 必要な列だけ抽出 (確実に存在することを確認済み)
                 res = target_df[['正番', '単ｵｯｽﾞ']].copy()
                 
-                # クリーニング
                 res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
                 
                 def clean_odds(x):
@@ -190,16 +189,14 @@ def fetch_odds_from_web(url, force_mode=False):
                     if s in ['--', '---', '取消', '除外', 'nan', 'NaN', 'None']:
                         return np.nan
                     s = re.sub(r'\(.*?\)', '', s) 
-                    try: 
-                        return float(s)
-                    except: 
-                        return np.nan
+                    try: return float(s)
+                    except: return np.nan
                 
                 res['単ｵｯｽﾞ'] = res['単ｵｯｽﾞ'].apply(clean_odds)
                 res = res.dropna(subset=['正番'])
                 
                 if res['単ｵｯｽﾞ'].isna().all():
-                    st.toast("⚠️ オッズまたは人気順の数値取得に失敗しました。馬番のみ反映します。", icon="ℹ️")
+                    st.toast("⚠️ オッズ数値なし。馬番のみ読み込みます。", icon="ℹ️")
                     return res, "NaN Warning"
                     
                 return res, "Success"
@@ -228,15 +225,15 @@ def fetch_odds_from_web(url, force_mode=False):
             result_df, msg_fallback = try_fetch(fallback_url)
             
             if result_df is None:
-                st.error("❌ オッズ情報の取得に失敗しました。")
-                with st.expander("🔍 詳細デバッグ情報"):
-                    st.write(f"試行1 ({target_url}): {msg}")
-                    st.write(f"試行2 ({fallback_url}): {msg_fallback}")
+                st.error("❌ 取得失敗")
+                with st.expander("🔍 詳細ログ"):
+                    st.write(f"1: {msg}")
+                    st.write(f"2: {msg_fallback}")
                 return None, "Failed"
         else:
-            st.error("❌ オッズ情報の取得に失敗しました。")
-            with st.expander("🔍 詳細デバッグ情報"):
-                st.write(f"試行 ({target_url}): {msg}")
+            st.error("❌ 取得失敗")
+            with st.expander("🔍 詳細ログ"):
+                st.write(msg)
             return None, "Failed"
             
     return result_df, "Success"
@@ -485,92 +482,6 @@ def analyze_logic(df_curr, df_prev=None):
     if '着順' not in res_df.columns: res_df['着順'] = np.nan
     
     return res_df
-
-# ==========================================
-# 3. 総合評価・再計算ロジック
-# ==========================================
-
-def apply_ranking_logic(df_in):
-    """最新のオッズやトレンドに基づいてスコアと推奨度を再計算する"""
-    if df_in.empty: return df_in
-    df = df_in.copy()
-    
-    df['着順'] = pd.to_numeric(df['着順'], errors='coerce')
-    df_hits = df[df['着順'] <= 3]
-    
-    hit_patterns = set()
-    downgraded_attrs = set()
-    
-    for _, row in df_hits.iterrows():
-        pats = str(row.get('パターン', '')).split(',')
-        hit_patterns.update(pats)
-        if '青隣' in str(row.get('パターン', '')):
-            found = re.findall(r'<(.*?)>', str(row.get('属性', '')))
-            downgraded_attrs.update(found)
-
-    def calc_bonus(row):
-        row_pat = row.get('パターン', '')
-        if not row_pat or pd.isna(row_pat): return 0.0
-        pats = str(row_pat).split(',')
-        bonus = 0.0
-        
-        # 1. ヒットパターン加点 (トレンド) +4.0
-        for p in pats:
-            if p in hit_patterns and len(p) == 1: 
-                bonus += 4.0 
-        
-        # 2. 青塗処理
-        if '青' in pats:
-            my_attrs = str(row.get('属性', ''))
-            for bad_attr in downgraded_attrs:
-                if bad_attr in my_attrs:
-                    bonus -= 3.0
-                    break
-        
-        # 3. 高オッズによる減点 (50倍以上は圏外)
-        odds = pd.to_numeric(row.get('単ｵｯｽﾞ'), errors='coerce')
-        if pd.notna(odds) and odds > 49.9:
-            bonus -= 30.0
-                
-        return bonus
-
-    def get_bet_recommendation(row):
-        score = row['総合スコア']
-        rank_in_race = row['レース内順位']
-        pat_str = str(row.get('パターン', ''))
-        my_pats = pat_str.split(',')
-        matched = [p for p in my_pats if p in hit_patterns]
-        is_trend_horse = len(matched) > 0
-        is_blue = '青' in my_pats
-
-        if score >= 15: rank = "S"
-        elif score >= 12: rank = "A"
-        elif score >= 10: rank = "B"
-        elif is_blue: rank = "C"
-        else: rank = "D"
-
-        if rank_in_race > 1:
-            if rank == "S": rank = "A"
-            elif rank == "A": rank = "B"
-        
-        if rank == "S":
-            return "👑 盤石の軸" if is_trend_horse else "👑 鉄板級"
-        elif rank == "A":
-            return "✨ 傾向軸" if is_trend_horse else "◎ 軸候補"
-        elif rank == "B":
-            return "🔥 激熱相手" if is_trend_horse else "○ 相手筆頭"
-        elif rank == "C":
-            return "★ 傾向合致穴" if is_trend_horse else "▲ 青塗穴"
-        else: 
-            if is_trend_horse: return "注 傾向合致"
-            return "△ 紐"
-
-    df['傾向加点'] = df.apply(calc_bonus, axis=1)
-    df['総合スコア'] = df['スコア'] + df['傾向加点']
-    df['レース内順位'] = df.groupby(['場名', 'R'])['総合スコア'].rank(method='min', ascending=False)
-    df['推奨買い目'] = df.apply(get_bet_recommendation, axis=1)
-    
-    return df
 
 # ==========================================
 # 4. Webアプリ画面 (Streamlit)
