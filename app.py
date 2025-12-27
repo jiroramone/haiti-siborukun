@@ -57,7 +57,6 @@ def load_data(file):
 
     # データ整形
     df.columns = df.columns.str.strip()
-    # ★重要: ここでExcelの「単オッズ」を内部用の「単ｵｯｽﾞ」に変換しています
     rename_map = {
         '場所': '場名', '開催': '場名', 
         '調教師': '厩舎', '調教師名': '厩舎', '厩舎名': '厩舎',
@@ -100,11 +99,12 @@ def load_data(file):
     
     return df[required_cols + existing_save_cols].copy(), "success"
 
-# ★修正: サイトの「オッズ」を「単ｵｯｽﾞ」に確実に変換する関数
+# ★修正: クラッシュ防止の安全装置を追加したオッズ取得関数
 def fetch_odds_from_web(url, force_mode=False):
     
     def try_fetch(target_url):
         try:
+            # User-Agent偽装
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             }
@@ -153,16 +153,14 @@ def fetch_odds_from_web(url, force_mode=False):
                         if '馬番' in clean_col: 
                             col_map[original_col] = '正番'
                         
-                        # ★ここ修正: サイト上の色々な名前を、アプリ内の「単ｵｯｽﾞ」に統一
                         elif '単勝' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
                         elif '予想オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
-                        elif 'オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ' # 「オッズ」があれば「単ｵｯｽﾞ」へ
-                        
+                        elif 'オッズ' in clean_col: col_map[original_col] = '単ｵｯｽﾞ'
                         elif '人気' in clean_col: col_map[original_col] = '人気_temp'
 
                     if '正番' in col_map.values():
                         if '単ｵｯｽﾞ' not in col_map.values():
-                            # もしオッズがなく人気しかなければ、人気をオッズ列として一旦読む（後で数値チェック）
+                            # 人気があればそれをオッズ列として代用
                             for k, v in col_map.items():
                                 if v == '人気_temp':
                                     col_map[k] = '単ｵｯｽﾞ'
@@ -173,18 +171,25 @@ def fetch_odds_from_web(url, force_mode=False):
                             break
             
             if target_df is not None:
-                # 必要な列だけ抽出
+                # ★重要: クラッシュ防止（列が存在するか確認し、なければ作る）
+                if '正番' not in target_df.columns:
+                    return None, "Rename failed for '正番'"
+                
+                if '単ｵｯｽﾞ' not in target_df.columns:
+                    # ここで強制的に列を作る
+                    target_df['単ｵｯｽﾞ'] = np.nan
+                
+                # 必要な列だけ抽出 (copyしてスライス)
                 res = target_df[['正番', '単ｵｯｽﾞ']].copy()
                 
-                # 正番のクリーニング
+                # クリーニング
                 res['正番'] = pd.to_numeric(res['正番'], errors='coerce')
                 
-                # オッズのクリーニング
                 def clean_odds(x):
                     s = str(x).strip()
-                    if s in ['--', '---', '取消', '除外', 'nan', 'NaN']:
+                    if s in ['--', '---', '取消', '除外', 'nan', 'NaN', 'None']:
                         return np.nan
-                    s = re.sub(r'\(.*?\)', '', s) # カッコ書き削除
+                    s = re.sub(r'\(.*?\)', '', s) 
                     try: 
                         return float(s)
                     except: 
@@ -194,8 +199,8 @@ def fetch_odds_from_web(url, force_mode=False):
                 res = res.dropna(subset=['正番'])
                 
                 if res['単ｵｯｽﾞ'].isna().all():
-                    st.toast("⚠️ 数値データが見つかりませんでした。馬番のみ読み込みます。", icon="ℹ️")
-                    return res, "Columns found but all odds are NaN (Loaded anyway)"
+                    st.toast("⚠️ オッズまたは人気順の数値取得に失敗しました。馬番のみ反映します。", icon="ℹ️")
+                    return res, "NaN Warning"
                     
                 return res, "Success"
             
