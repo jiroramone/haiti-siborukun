@@ -1,8 +1,8 @@
 streamlit
 pandas
 numpy
-plotly
 openpyxl
+scikit-learn
+plotly
 requests
 beautifulsoup4
-html5lib
